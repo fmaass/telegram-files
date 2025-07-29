@@ -309,8 +309,18 @@ public class TelegramVerticle extends AbstractVerticle {
                 )
                 .compose(results -> {
                     TdApi.File file = results.resultAt(0);
-                    TdApi.Message message = results.resultAt(1);
-                    TdApi.MessageThreadInfo messageThreadInfo = results.resultAt(2);
+                    return DataVerticle.fileRepository.getByUniqueId(file.remote.uniqueId)
+                            .map(fileRecord -> Tuple.tuple(file,
+                                    results.<TdApi.Message>resultAt(1),
+                                    results.<TdApi.MessageThreadInfo>resultAt(2),
+                                    fileRecord
+                            ));
+                })
+                .compose(results -> {
+                    TdApi.File file = results.v1;
+                    TdApi.Message message = results.v2;
+                    TdApi.MessageThreadInfo messageThreadInfo = results.v3;
+                    FileRecord dbFileRecord = results.v4;
                     if (file.local != null) {
                         if (file.local.isDownloadingCompleted) {
                             return syncFileDownloadStatus(file, message, messageThreadInfo)
@@ -320,6 +330,9 @@ public class TelegramVerticle extends AbstractVerticle {
                             return Future.failedFuture("File is downloading");
                         }
 //                        return Future.failedFuture("Unknown file download status");
+                    }
+                    if (dbFileRecord != null && !dbFileRecord.isDownloadStatus(FileRecord.DownloadStatus.idle)) {
+                        return Future.failedFuture("File is already downloading or completed");
                     }
 
                     TdApiHelp.FileHandler<? extends TdApi.MessageContent> fileHandler = TdApiHelp.getFileHandler(message)
