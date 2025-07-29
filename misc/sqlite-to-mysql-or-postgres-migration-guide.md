@@ -22,7 +22,7 @@ DB_NAME=telegram-files
 #### 🔹 For **PostgreSQL**:
 
 ```env
-DB_TYPE=postgresql
+DB_TYPE=postgres
 DB_HOST=telegram-files-postgres
 DB_PORT=5432
 DB_USER=postgres
