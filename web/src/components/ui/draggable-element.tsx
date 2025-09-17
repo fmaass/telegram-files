@@ -44,17 +44,17 @@ const DraggableContent = ({
       {...listeners}
       {...attributes}
       className={cn(
-        `fixed touch-none select-none`,
-        isDragging && "opacity-80",
-        isDragging && "cursor-grabbing",
+        `fixed select-none`,
+        isDragging && "touch-none opacity-80 cursor-grabbing",
+        !isDragging && "touch-auto",
         className,
       )}
       style={{
         ...style,
         ...transformStyle,
-        touchAction: "none",
+        touchAction: isDragging ? "none" : "auto",
         WebkitUserSelect: "none", // 禁用文本选择
-        WebkitTouchCallout: "none", // 禁用触摸回调
+        WebkitTouchCallout: isDragging ? "none" : "default", // 只在拖拽时禁用触摸回调
         userSelect: "none",
       }}
       onContextMenu={preventContextMenu}
