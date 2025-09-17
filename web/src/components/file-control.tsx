@@ -260,12 +260,8 @@ export default function FileControl({
 }
 
 export function MobileFileControl({ file }: { file: TelegramFile }) {
-  const { start, starting, togglePause, togglingPause, cancel, cancelling } =
+  const { start, starting, togglePause, togglingPause, cancel, cancelling, remove, removing } =
     useFileControl(file);
-
-  if (file.downloadStatus === "completed") {
-    return null;
-  }
 
   return (
     <div className="flex w-full items-center justify-between space-x-2">
@@ -276,6 +272,7 @@ export function MobileFileControl({ file }: { file: TelegramFile }) {
           ) : (
             <ArrowDown className="h-4 w-4" />
           )}
+          <span className="ml-2">Download</span>
         </Button>
       )}
       {(file.downloadStatus === "downloading" ||
@@ -289,6 +286,9 @@ export function MobileFileControl({ file }: { file: TelegramFile }) {
             ) : (
               <StepForward className="h-4 w-4" />
             )}
+            <span className="ml-2">
+              {file.downloadStatus === "downloading" ? "Pause" : "Resume"}
+            </span>
           </Button>
           <Button
             variant="destructive"
@@ -300,8 +300,19 @@ export function MobileFileControl({ file }: { file: TelegramFile }) {
             ) : (
               <SquareX className="h-4 w-4" />
             )}
+            <span className="ml-2">Cancel</span>
           </Button>
         </>
+      )}
+      {file.downloadStatus === "completed" && (
+        <Button variant="outline" className="w-full" onClick={() => remove(file.id)}>
+          {removing ? (
+            <Loader2 className="h-4 w-4 animate-spin" />
+          ) : (
+            <FileX className="h-4 w-4" />
+          )}
+          <span className="ml-2">Remove</span>
+        </Button>
       )}
     </div>
   );

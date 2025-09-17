@@ -85,14 +85,18 @@ export default function FileList({ accountId, chatId, link }: FileListProps) {
     }
     const index = files.findIndex((f) => f.id === currentViewFile.id);
     if (index === -1) {
-      setCurrentViewFile(undefined);
+      // 只有在drawer关闭时才清除currentViewFile，避免下载完成时意外关闭
+      if (!isDrawerOpen) {
+        setCurrentViewFile(undefined);
+      }
       return;
     }
     const file = files[index]!;
     if (!isEqual(file, currentViewFile)) {
+      // 静默更新文件数据，不触发drawer关闭
       setCurrentViewFile(file);
     }
-  }, [currentViewFile, files]);
+  }, [files, currentViewFile, isDrawerOpen]);
 
   return (
     <div className="space-y-4">

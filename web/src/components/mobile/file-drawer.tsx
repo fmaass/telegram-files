@@ -31,9 +31,17 @@ export default function FileDrawer({
 }: FileDrawerProps) {
   const [viewing, setViewing] = useState(false);
 
+  // 防止在下载状态变化时意外调用onFileChange导致drawer关闭
+  const handleFileChange = (newFile: TelegramFile) => {
+    // 只在真正切换到不同文件时才调用onFileChange
+    if (newFile.id !== file.id) {
+      onFileChange(newFile);
+    }
+  };
+
   const { handleNavigation, direction } = useFileSwitch({
     file,
-    onFileChange,
+    onFileChange: handleFileChange,
     hasMore,
     handleLoadMore,
   });
@@ -134,7 +142,7 @@ export default function FileDrawer({
         )}
         <AnimatePresence initial={false} custom={direction} mode="popLayout">
           <motion.div
-            key={file.id}
+            key={`${file.id}-${file.uniqueId}`}
             custom={direction}
             variants={slideVariants}
             initial="enter"
