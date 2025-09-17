@@ -3,6 +3,7 @@ import {
   type DownloadStatus,
   type FileFilter,
   type TelegramFile,
+  type Thumbnail,
   type TransferStatus,
 } from "@/lib/types";
 import useSWRInfinite from "swr/infinite";
@@ -47,6 +48,7 @@ export function useFiles(
         completionDate?: number;
         downloadedSize: number;
         transferStatus?: TransferStatus;
+        thumbnailFile?: Thumbnail;
         removed?: boolean;
       }
     >
@@ -132,6 +134,7 @@ export function useFiles(
       completionDate: number;
       downloadedSize: number;
       transferStatus?: TransferStatus;
+      thumbnailFile?: Thumbnail;
       removed?: boolean;
     };
 
@@ -164,6 +167,8 @@ export function useFiles(
           data.downloadedSize ?? prev[data.uniqueId]?.downloadedSize,
         transferStatus:
           data.transferStatus ?? prev[data.uniqueId]?.transferStatus,
+        thumbnailFile:
+          data.thumbnailFile ?? prev[data.uniqueId]?.thumbnailFile,
       },
     }));
   }, [lastJsonMessage]);
@@ -202,6 +207,9 @@ export function useFiles(
           transferStatus:
             latestFilesStatus[file.uniqueId]?.transferStatus ??
             file.transferStatus,
+          thumbnailFile:
+            latestFilesStatus[file.uniqueId]?.thumbnailFile ??
+            file.thumbnailFile,
         });
       });
     });
