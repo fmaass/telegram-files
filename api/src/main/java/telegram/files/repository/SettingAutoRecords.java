@@ -92,6 +92,9 @@ public class SettingAutoRecords {
         public boolean downloadHistory;
 
         public boolean downloadCommentFiles;
+
+        /** UTC seconds since epoch. If present, only backfill messages on/after this. */
+        public Integer historySince;
     }
 
     public static class TransferConfig {

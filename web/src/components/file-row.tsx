@@ -81,6 +81,13 @@ export default function FileRow({
         )}
       </div>
     ),
+    date: (
+      <TooltipWrapper content={file.formatDate}>
+        <span className="text-xs text-muted-foreground">
+          {file.formatDate}
+        </span>
+      </TooltipWrapper>
+    ),
     size: <span className="text-sm">{prettyBytes(file.size)}</span>,
     status: <FileStatus file={file} />,
     tags: (

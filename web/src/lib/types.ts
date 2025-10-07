@@ -199,4 +199,10 @@ export type AutoDownloadRule = {
   fileTypes: Array<Exclude<FileType, "media">>;
   downloadHistory: boolean;
   downloadCommentFiles: boolean;
+  /**
+   * Optional ISO-8601 timestamp (UTC) that bounds history backfill.
+   * If present, only messages sent on/after this date are considered.
+   * If null/undefined, all history is considered (when downloadHistory is true).
+   */
+  historySince?: string | null;
 };

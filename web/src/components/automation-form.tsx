@@ -295,6 +295,27 @@ function DownloadRule({ value, onChange }: DownloadRuleProps) {
                 If enabled, all historical files will be downloaded. Otherwise,
                 only new files will be downloaded.
               </p>
+
+              {/* History cut-off date */}
+              <div className="mt-3 flex items-center justify-between">
+                <Label htmlFor="history-since">History since</Label>
+                <input
+                  id="history-since"
+                  type="date"
+                  className="ml-3 w-56 rounded-md border p-1 text-sm"
+                  value={value.historySince ? new Date(value.historySince).toISOString().slice(0,10) : ""}
+                  onChange={(e) =>
+                    onChange({
+                      ...value,
+                      historySince: e.target.value ? new Date(e.target.value + "T00:01:00Z").toISOString() : null,
+                    })
+                  }
+                  disabled={!value.downloadHistory}
+                />
+              </div>
+              <p className="mt-1 text-xs text-muted-foreground">
+                Time is automatically set to 00:01 AM on the selected date.
+              </p>
             </div>
             <div className="rounded-md border p-4">
               <div className="flex items-center justify-between">

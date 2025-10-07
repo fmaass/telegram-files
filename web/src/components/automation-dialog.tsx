@@ -65,7 +65,20 @@ export default function AutomationDialog() {
         arg: Auto;
       },
     ) => {
-      return POST(key, arg);
+      // Convert historySince from ISO string to epoch seconds for backend
+      const payload = {
+        ...arg,
+        download: {
+          ...arg.download,
+          rule: {
+            ...arg.download.rule,
+            historySince: arg.download.rule.historySince 
+              ? Math.floor(new Date(arg.download.rule.historySince).getTime() / 1000)
+              : null,
+          },
+        },
+      };
+      return POST(key, payload);
     },
     {
       onSuccess: () => {
@@ -88,7 +101,20 @@ export default function AutomationDialog() {
 
   useEffect(() => {
     if (chat?.auto) {
-      setAuto(chat.auto);
+      // Convert historySince from epoch seconds to ISO string for frontend
+      const autoWithConvertedDate = {
+        ...chat.auto,
+        download: {
+          ...chat.auto.download,
+          rule: {
+            ...chat.auto.download.rule,
+            historySince: chat.auto.download.rule.historySince
+              ? new Date((chat.auto.download.rule.historySince as any) * 1000).toISOString()
+              : null,
+          },
+        },
+      };
+      setAuto(autoWithConvertedDate);
     } else {
       setAuto(DEFAULT_AUTO);
     }

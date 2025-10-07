@@ -164,6 +164,28 @@ public class AutoDownloadVerticle extends AbstractVerticle {
             return;
         }
         scanThreads.removeIf(scanThread -> scanThread.isComplete);
+        
+        // Compute sentinel message ID once if historySince is provided
+        Long sentinelMessageId = null;
+        if (auto.download.rule.historySince != null && auto.download.rule.historySince > 0) {
+            try {
+                TelegramVerticle telegramVerticle = TelegramVerticles.getOrElseThrow(auto.telegramId);
+                TdApi.Message sentinelMessage = Future.await(
+                    telegramVerticle.client.execute(
+                        new TdApi.GetChatMessageByDate(auto.chatId, auto.download.rule.historySince)
+                    )
+                );
+                if (sentinelMessage != null) {
+                    sentinelMessageId = sentinelMessage.id;
+                    log.info("History cutoff enabled for comment messages in chat %d: sentinel message ID = %d (date: %d)"
+                        .formatted(auto.chatId, sentinelMessageId, auto.download.rule.historySince));
+                }
+            } catch (Exception e) {
+                log.warn("Failed to get sentinel message for comment history cutoff: %s".formatted(e.getMessage()));
+            }
+        }
+        
+        Long finalSentinelMessageId = sentinelMessageId;
         waitingScanThreads.get(auto.telegramId).forEach(scanThread -> {
             ScanParams scanParams = new ScanParams(auto.uniqueKey() + ":" + scanThread.messageThreadId,
                     auto.download.rule,
@@ -172,6 +194,7 @@ public class AutoDownloadVerticle extends AbstractVerticle {
                     scanThread.nextFileType,
                     scanThread.nextFromMessageId);
             scanParams.messageThreadId = scanThread.messageThreadId;
+            scanParams.sentinelMessageId = finalSentinelMessageId;
             addHistoryMessage(scanParams,
                     result -> {
                         scanThread.nextFileType = result.nextFileType;
@@ -186,12 +209,33 @@ public class AutoDownloadVerticle extends AbstractVerticle {
     }
 
     private void addHistoryMessage(SettingAutoRecords.Automation auto) {
-        addHistoryMessage(new ScanParams(auto.uniqueKey(),
-                        auto.download.rule,
-                        auto.telegramId,
-                        auto.chatId,
-                        auto.download.nextFileType,
-                        auto.download.nextFromMessageId),
+        ScanParams params = new ScanParams(auto.uniqueKey(),
+                auto.download.rule,
+                auto.telegramId,
+                auto.chatId,
+                auto.download.nextFileType,
+                auto.download.nextFromMessageId);
+        
+        // Compute sentinel message ID if historySince is provided
+        if (auto.download.rule.historySince != null && auto.download.rule.historySince > 0) {
+            try {
+                TelegramVerticle telegramVerticle = TelegramVerticles.getOrElseThrow(auto.telegramId);
+                TdApi.Message sentinelMessage = Future.await(
+                    telegramVerticle.client.execute(
+                        new TdApi.GetChatMessageByDate(auto.chatId, auto.download.rule.historySince)
+                    )
+                );
+                if (sentinelMessage != null) {
+                    params.sentinelMessageId = sentinelMessage.id;
+                    log.info("History cutoff enabled for chat %d: sentinel message ID = %d (date: %d)"
+                        .formatted(auto.chatId, params.sentinelMessageId, auto.download.rule.historySince));
+                }
+            } catch (Exception e) {
+                log.warn("Failed to get sentinel message for history cutoff: %s".formatted(e.getMessage()));
+            }
+        }
+        
+        addHistoryMessage(params,
                 result -> {
                     auto.download.nextFileType = result.nextFileType;
                     auto.download.nextFromMessageId = result.nextFromMessageId;
@@ -256,10 +300,33 @@ public class AutoDownloadVerticle extends AbstractVerticle {
                 callback.accept(new ScanResult(nextFileType, nextFromMessageId, true));
             }
         } else {
+            // Check if we've reached the history cutoff date
+            final boolean reachedCutoff;
+            if (params.sentinelMessageId != null && foundChatMessages.messages.length > 0) {
+                long oldestMessageId = foundChatMessages.messages[foundChatMessages.messages.length - 1].id;
+                if (oldestMessageId <= params.sentinelMessageId) {
+                    reachedCutoff = true;
+                    log.info("Reached history cutoff at message ID %d (sentinel: %d) for chat %d"
+                        .formatted(oldestMessageId, params.sentinelMessageId, chatId));
+                } else {
+                    reachedCutoff = false;
+                }
+            } else {
+                reachedCutoff = false;
+            }
+            
+            final String finalNextFileType = nextFileType;
+            final long finalNextFromMessageId = nextFromMessageId;
+            
             DataVerticle.fileRepository.getFilesByUniqueId(TdApiHelp.getFileUniqueIds(Arrays.asList(foundChatMessages.messages)))
                     .onSuccess(existFiles -> {
                         List<TdApi.Message> messages = Stream.of(foundChatMessages.messages)
                                 .filter(message -> {
+                                    // Filter out messages older than the sentinel
+                                    if (params.sentinelMessageId != null && message.id < params.sentinelMessageId) {
+                                        return false;
+                                    }
+                                    
                                     String uniqueId = TdApiHelp.getFileUniqueId(message);
                                     if (!existFiles.containsKey(uniqueId)) {
                                         return true;
@@ -269,12 +336,26 @@ public class AutoDownloadVerticle extends AbstractVerticle {
                                     }
                                 })
                                 .toList();
+                        
                         if (CollUtil.isEmpty(messages)) {
-                            params.nextFromMessageId = foundChatMessages.nextFromMessageId;
-                            addHistoryMessage(params, callback, currentTimeMillis);
-                        } else if (addWaitingDownloadMessages(telegramId, messages, false, true)) {
-                            params.nextFromMessageId = foundChatMessages.nextFromMessageId;
-                            addHistoryMessage(params, callback, currentTimeMillis);
+                            if (reachedCutoff) {
+                                // We've reached the cutoff, mark as complete
+                                log.info("History scan complete due to cutoff date for chat %d".formatted(chatId));
+                                callback.accept(new ScanResult(finalNextFileType, finalNextFromMessageId, true));
+                            } else {
+                                params.nextFromMessageId = foundChatMessages.nextFromMessageId;
+                                addHistoryMessage(params, callback, currentTimeMillis);
+                            }
+                        } else {
+                            boolean shouldContinue = addWaitingDownloadMessages(telegramId, messages, false, true);
+                            if (reachedCutoff) {
+                                // We've reached the cutoff, mark as complete
+                                log.info("History scan complete due to cutoff date for chat %d".formatted(chatId));
+                                callback.accept(new ScanResult(finalNextFileType, finalNextFromMessageId, true));
+                            } else if (shouldContinue) {
+                                params.nextFromMessageId = foundChatMessages.nextFromMessageId;
+                                addHistoryMessage(params, callback, currentTimeMillis);
+                            }
                         }
                     });
         }
@@ -429,6 +510,8 @@ public class AutoDownloadVerticle extends AbstractVerticle {
         public String nextFileType;
 
         public long nextFromMessageId;
+
+        public Long sentinelMessageId;
 
         public ScanParams(String uniqueKey,
                           SettingAutoRecords.DownloadRule rule,
