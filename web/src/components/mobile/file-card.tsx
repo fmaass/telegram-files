@@ -85,6 +85,9 @@ export function FileCard({
                   <span className="text-xs text-muted-foreground">
                     {prettyBytes(file.size)} • {file.type}
                   </span>
+                  <span className="text-xs text-muted-foreground">
+                    {file.formatDate}
+                  </span>
                   <div className="flex items-center gap-1">
                     <FileStatus file={file} className="justify-start" />
                     {file.loaded && (

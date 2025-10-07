@@ -202,4 +202,15 @@ export type AutoDownloadRule = {
   downloadHistory: boolean;
   downloadCommentFiles: boolean;
   filterExpr: string;
+  /**
+   * Optional ISO-8601 timestamp (UTC) that bounds history backfill.
+   * If present, only messages sent on/after this date are considered.
+   * If null/undefined, all history is considered (when downloadHistory is true).
+   */
+  historySince?: string | null;
+  /**
+   * If true, download files from oldest to newest.
+   * If false (default), download from newest to oldest.
+   */
+  downloadOldestFirst?: boolean;
 };

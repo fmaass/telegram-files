@@ -24,6 +24,9 @@ import org.jooq.lambda.tuple.Tuple2;
 import telegram.files.repository.*;
 
 import java.io.File;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.attribute.FileTime;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
@@ -865,7 +868,25 @@ public class TelegramVerticle extends AbstractVerticle {
                                             finalLocalPath,
                                             downloadStatus,
                                             finalCompletionDate)
-                                    .onSuccess(r -> sendFileStatusHttpEvent(file, r));
+                                    .onSuccess(r -> {
+                                        sendFileStatusHttpEvent(file, r);
+                                        
+                                        // Set file modification time to match original Telegram upload date
+                                        if (finalCompletionDate != null && finalLocalPath != null && fileRecord.date() > 0) {
+                                            try {
+                                                Path filePath = Path.of(finalLocalPath);
+                                                if (Files.exists(filePath)) {
+                                                    FileTime originalTime = FileTime.fromMillis(fileRecord.date() * 1000L);
+                                                    Files.setLastModifiedTime(filePath, originalTime);
+                                                    log.debug("Set file modification time for {} to {}", filePath.getFileName(), 
+                                                             DateUtil.date(fileRecord.date() * 1000L));
+                                                }
+                                            } catch (Exception e) {
+                                                log.warn("Failed to set file modification time for {}: {}", 
+                                                        finalLocalPath, e.getMessage());
+                                            }
+                                        }
+                                    });
                         }
                     });
 
@@ -903,32 +924,65 @@ public class TelegramVerticle extends AbstractVerticle {
                 .getByUniqueId(file.remote.uniqueId)
                 .compose(fileRecord -> {
                     if (fileRecord != null) {
+                        FileRecord finalFileRecord = fileRecord;
                         return DataVerticle.fileRepository.updateDownloadStatus(
                                 file.id,
                                 file.remote.uniqueId,
                                 file.local.path,
                                 FileRecord.DownloadStatus.completed,
                                 System.currentTimeMillis()
-                        );
+                        ).onSuccess(r -> {
+                            // Set file modification time to match original Telegram upload date
+                            if (file.local.path != null && finalFileRecord.date() > 0) {
+                                try {
+                                    Path filePath = Path.of(file.local.path);
+                                    if (Files.exists(filePath)) {
+                                        FileTime originalTime = FileTime.fromMillis(finalFileRecord.date() * 1000L);
+                                        Files.setLastModifiedTime(filePath, originalTime);
+                                        log.debug("Set file modification time for {} to {}", filePath.getFileName(), 
+                                                 DateUtil.date(finalFileRecord.date() * 1000L));
+                                    }
+                                } catch (Exception e) {
+                                    log.warn("Failed to set file modification time for {}: {}", 
+                                            file.local.path, e.getMessage());
+                                }
+                            }
+                        });
                     }
 
                     if (message == null) {
                         return Future.failedFuture("File not found");
                     }
 
-                    fileRecord = TdApiHelp.getFileHandler(message)
+                    FileRecord newFileRecord = TdApiHelp.getFileHandler(message)
                             .orElseThrow(() -> VertxException.noStackTrace("not support message type"))
                             .convertFileRecord(telegramRecord.id())
                             .withThreadInfo(messageThreadInfo);
 
-                    return DataVerticle.fileRepository.create(fileRecord)
-                            .compose(_ -> DataVerticle.fileRepository.updateDownloadStatus(
+                    return DataVerticle.fileRepository.create(newFileRecord)
+                            .compose(r -> DataVerticle.fileRepository.updateDownloadStatus(
                                     file.id,
                                     file.remote.uniqueId,
                                     file.local.path,
                                     FileRecord.DownloadStatus.completed,
                                     System.currentTimeMillis()
-                            ));
+                            ).onSuccess(updateResult -> {
+                                // Set file modification time to match original Telegram upload date
+                                if (file.local.path != null && newFileRecord.date() > 0) {
+                                    try {
+                                        Path filePath = Path.of(file.local.path);
+                                        if (Files.exists(filePath)) {
+                                            FileTime originalTime = FileTime.fromMillis(newFileRecord.date() * 1000L);
+                                            Files.setLastModifiedTime(filePath, originalTime);
+                                            log.debug("Set file modification time for {} to {}", filePath.getFileName(), 
+                                                     DateUtil.date(newFileRecord.date() * 1000L));
+                                        }
+                                    } catch (Exception e) {
+                                        log.warn("Failed to set file modification time for {}: {}", 
+                                                file.local.path, e.getMessage());
+                                    }
+                                }
+                            }));
                 })
                 .compose(r -> {
                     sendFileStatusHttpEvent(file, r);
