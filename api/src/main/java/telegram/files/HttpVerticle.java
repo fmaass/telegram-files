@@ -30,6 +30,7 @@ import io.vertx.ext.web.sstore.LocalSessionStore;
 import io.vertx.ext.web.sstore.SessionStore;
 import org.drinkless.tdlib.TdApi;
 import org.jooq.lambda.function.Function2;
+import telegram.files.repository.FileRecord;
 import telegram.files.repository.SettingAutoRecords;
 import telegram.files.repository.SettingKey;
 import telegram.files.repository.SettingRecord;
@@ -48,6 +49,12 @@ public class HttpVerticle extends AbstractVerticle {
 
     // session id -> telegram verticle
     private final Map<String, TelegramVerticle> sessionTelegramVerticles = new ConcurrentHashMap<>();
+    
+    // telegramId -> queue of files waiting to download
+    private final Map<Long, Queue<JsonObject>> downloadQueues = new ConcurrentHashMap<>();
+    
+    // telegramId -> timer ID for processing queue
+    private final Map<Long, Long> queueTimerIds = new ConcurrentHashMap<>();
 
     private final List<String> unboundClients = new ArrayList<>();
 
@@ -634,15 +641,128 @@ public class HttpVerticle extends AbstractVerticle {
     }
 
     private void handleFileStartDownloadMultiple(RoutingContext ctx) {
-        handleFileMultiple(ctx, (telegramVerticle, file) -> {
-            Long chatId = file.getLong("chatId");
-            Long messageId = file.getLong("messageId");
-            Integer fileId = file.getInteger("fileId");
-            if (chatId == null || messageId == null || fileId == null) {
-                return Future.failedFuture("Invalid parameters");
+        JsonObject jsonObject = ctx.body().asJsonObject();
+        JsonArray files = jsonObject.getJsonArray("files");
+        if (CollUtil.isEmpty(files)) {
+            ctx.fail(400);
+            return;
+        }
+        
+        // Group files by telegramId
+        Map<Long, List<JsonObject>> groupingByTelegramId = files.stream()
+                .map(f -> (JsonObject) f)
+                .collect(Collectors.groupingBy(f -> f.getLong("telegramId")));
+        
+        // Process each telegram account with concurrency control
+        List<Future<?>> accountFutures = new ArrayList<>();
+        
+        for (Map.Entry<Long, List<JsonObject>> entry : groupingByTelegramId.entrySet()) {
+            Long telegramId = entry.getKey();
+            List<JsonObject> accountFiles = entry.getValue();
+            
+            TelegramVerticle telegramVerticle = TelegramVerticles.getOrElseThrow(telegramId);
+            
+            // Get the download limit and current downloading count asynchronously
+            Future<Integer> limitFuture = DataVerticle.settingRepository.<Integer>getByKey(SettingKey.autoDownloadLimit)
+                    .map(limit -> limit != null && limit > 0 ? limit : 5)
+                    .otherwise(5);
+            
+            Future<Integer> downloadingFuture = DataVerticle.fileRepository.countByStatus(telegramId, FileRecord.DownloadStatus.downloading)
+                    .otherwise(0);
+            
+            Future<?> accountFuture = Future.all(limitFuture, downloadingFuture)
+                    .compose(results -> {
+                        int limit = results.resultAt(0);
+                        Integer downloading = results.resultAt(1);
+                        int surplusSize = Math.max(0, limit - (downloading != null ? downloading : 0));
+                        
+                        // Start downloads respecting the concurrency limit
+                        List<JsonObject> filesToDownloadNow = accountFiles.stream()
+                                .limit(Math.min(surplusSize, accountFiles.size()))
+                                .collect(Collectors.toList());
+                        
+                        List<Future<?>> downloadFutures = new ArrayList<>();
+                        for (JsonObject file : filesToDownloadNow) {
+                            Long chatId = file.getLong("chatId");
+                            Long messageId = file.getLong("messageId");
+                            Integer fileId = file.getInteger("fileId");
+                            if (chatId == null || messageId == null || fileId == null) {
+                                continue;
+                            }
+                            downloadFutures.add(telegramVerticle.startDownload(chatId, messageId, fileId));
+                        }
+                        
+                        // Queue remaining files
+                        int queuedCount = accountFiles.size() - filesToDownloadNow.size();
+                        if (queuedCount > 0) {
+                            Queue<JsonObject> queue = downloadQueues.computeIfAbsent(telegramId, k -> new LinkedList<>());
+                            queue.addAll(accountFiles.subList(filesToDownloadNow.size(), accountFiles.size()));
+                            log.debug("Queued %d files for telegramId %d (limit: %d, currently downloading: %d, started: %d)"
+                                    .formatted(queuedCount, telegramId, limit, downloading != null ? downloading : 0, downloadFutures.size()));
+                            
+                            // Start processing queue if not already running
+                            if (!queueTimerIds.containsKey(telegramId)) {
+                                startQueueProcessor(telegramId, limit);
+                            }
+                        }
+                        
+                        return Future.all(downloadFutures);
+                    });
+            
+            accountFutures.add(accountFuture);
+        }
+        
+        // Wait for all account processing to complete
+        Future.all(accountFutures)
+                .onSuccess(r -> {
+                    JsonObject response = new JsonObject();
+                    response.put("message", "Downloads started with concurrency control");
+                    ctx.json(response);
+                })
+                .onFailure(r -> {
+                    log.error(r, "Failed to start batch downloads: %s".formatted(r.getMessage()));
+                    ctx.response()
+                            .setStatusCode(400)
+                            .end(JsonObject.of("error", "Part of the files failed to start: %s".formatted(r.getMessage())).encode());
+                });
+    }
+    
+    private void startQueueProcessor(Long telegramId, int limit) {
+        TelegramVerticle telegramVerticle = TelegramVerticles.getOrElseThrow(telegramId);
+        long timerId = vertx.setPeriodic(2000, id -> {
+            Queue<JsonObject> queue = downloadQueues.get(telegramId);
+            if (queue == null || queue.isEmpty()) {
+                // Stop timer and clean up
+                vertx.cancelTimer(id);
+                queueTimerIds.remove(telegramId);
+                downloadQueues.remove(telegramId);
+                return;
             }
-            return telegramVerticle.startDownload(chatId, messageId, fileId);
+            
+            // Check current downloading count
+            DataVerticle.fileRepository.countByStatus(telegramId, FileRecord.DownloadStatus.downloading)
+                    .onSuccess(downloading -> {
+                        int currentDownloading = downloading != null ? downloading : 0;
+                        int surplus = Math.max(0, limit - currentDownloading);
+                        
+                        // Start up to surplus number of downloads from queue
+                        int toStart = Math.min(surplus, queue.size());
+                        for (int i = 0; i < toStart; i++) {
+                            JsonObject file = queue.poll();
+                            if (file == null) break;
+                            
+                            Long chatId = file.getLong("chatId");
+                            Long messageId = file.getLong("messageId");
+                            Integer fileId = file.getInteger("fileId");
+                            if (chatId != null && messageId != null && fileId != null) {
+                                telegramVerticle.startDownload(chatId, messageId, fileId)
+                                        .onFailure(e -> log.error("Failed to start queued download: %s".formatted(e.getMessage())));
+                            }
+                        }
+                    })
+                    .onFailure(e -> log.error("Failed to check download status for queue processor: %s".formatted(e.getMessage())));
         });
+        queueTimerIds.put(telegramId, timerId);
     }
 
     private void handleFileCancelDownloadMultiple(RoutingContext ctx) {

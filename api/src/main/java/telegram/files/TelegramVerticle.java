@@ -28,6 +28,8 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.attribute.FileTime;
 import java.util.Arrays;
+import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
@@ -771,6 +773,8 @@ public class TelegramVerticle extends AbstractVerticle {
                 sendEvent(EventPayload.build(EventPayload.TYPE_AUTHORIZATION, authorizationState));
                 telegramChats.loadMainChatList();
                 telegramChats.loadArchivedChatList();
+                // Sync download status for files marked as completed in database
+                syncCompletedFilesStatus();
                 break;
             case TdApi.AuthorizationStateLoggingOut.CONSTRUCTOR:
                 break;
@@ -944,5 +948,104 @@ public class TelegramVerticle extends AbstractVerticle {
                         return Future.failedFuture("File is already downloaded successfully");
                     }
                 });
+    }
+    
+    private void syncCompletedFilesStatus() {
+        if (telegramRecord == null) {
+            return;
+        }
+        
+        log.info("[%s] Starting sync of completed files status...".formatted(getRootId()));
+        
+        // Get completed files in batches to avoid loading too many at once
+        Map<String, String> filter = new HashMap<>();
+        filter.put("downloadStatus", FileRecord.DownloadStatus.completed.name());
+        filter.put("limit", "100"); // Process in batches of 100
+        
+        DataVerticle.fileRepository.getFiles(0, filter)
+                .onSuccess(result -> {
+                    List<FileRecord> completedFiles = result.v1();
+                    if (completedFiles.isEmpty()) {
+                        log.debug("[%s] No completed files to sync".formatted(getRootId()));
+                        return;
+                    }
+                    
+                    log.info("[%s] Syncing %d completed files...".formatted(getRootId(), completedFiles.size()));
+                    
+                    // Use AtomicInteger for thread-safe counting in async callbacks
+                    java.util.concurrent.atomic.AtomicInteger synced = new java.util.concurrent.atomic.AtomicInteger(0);
+                    java.util.concurrent.atomic.AtomicInteger notFound = new java.util.concurrent.atomic.AtomicInteger(0);
+                    java.util.concurrent.atomic.AtomicInteger processed = new java.util.concurrent.atomic.AtomicInteger(0);
+                    
+                    for (FileRecord fileRecord : completedFiles) {
+                        // Skip if file doesn't belong to this telegram account
+                        if (fileRecord.telegramId() != telegramRecord.id()) {
+                            processed.incrementAndGet();
+                            continue;
+                        }
+                        
+                        // Check if file exists on disk
+                        if (StrUtil.isBlank(fileRecord.localPath()) || !FileUtil.exist(fileRecord.localPath())) {
+                            // File marked as completed but doesn't exist - reset to idle
+                            DataVerticle.fileRepository.updateDownloadStatus(
+                                    fileRecord.id(),
+                                    fileRecord.uniqueId(),
+                                    null,
+                                    FileRecord.DownloadStatus.idle,
+                                    null
+                            ).onSuccess(r -> {
+                                log.debug("[%s] Reset file status to idle (file not found): %s"
+                                        .formatted(getRootId(), fileRecord.uniqueId()));
+                                notFound.incrementAndGet();
+                                checkSyncComplete(processed.incrementAndGet(), completedFiles.size(), synced.get(), notFound.get());
+                            })
+                            .onFailure(e -> {
+                                notFound.incrementAndGet();
+                                checkSyncComplete(processed.incrementAndGet(), completedFiles.size(), synced.get(), notFound.get());
+                            });
+                            continue;
+                        }
+                        
+                        // File exists - verify with Telegram client
+                        // Query the file to sync its status
+                        client.execute(new TdApi.GetFile(fileRecord.id()))
+                                .onSuccess(file -> {
+                                    if (file != null && file.local != null && file.local.isDownloadingCompleted) {
+                                        // File is actually completed - sync status
+                                        syncFileDownloadStatus(file, null, null)
+                                                .onSuccess(r -> {
+                                                    synced.incrementAndGet();
+                                                    checkSyncComplete(processed.incrementAndGet(), completedFiles.size(), synced.get(), notFound.get());
+                                                })
+                                                .onFailure(e -> {
+                                                    log.debug("[%s] Failed to sync file status: %s"
+                                                            .formatted(getRootId(), fileRecord.uniqueId()));
+                                                    checkSyncComplete(processed.incrementAndGet(), completedFiles.size(), synced.get(), notFound.get());
+                                                });
+                                    } else {
+                                        // File not completed in Telegram - might need to be re-downloaded
+                                        // But if it exists on disk, keep it as completed
+                                        log.debug("[%s] File exists on disk but not in Telegram cache: %s"
+                                                .formatted(getRootId(), fileRecord.uniqueId()));
+                                        checkSyncComplete(processed.incrementAndGet(), completedFiles.size(), synced.get(), notFound.get());
+                                    }
+                                })
+                                .onFailure(e -> {
+                                    // File might not be accessible - if it exists on disk, keep status
+                                    log.debug("[%s] Could not query file from Telegram (file exists on disk): %s"
+                                            .formatted(getRootId(), fileRecord.uniqueId()));
+                                    checkSyncComplete(processed.incrementAndGet(), completedFiles.size(), synced.get(), notFound.get());
+                                });
+                    }
+                })
+                .onFailure(e -> log.error("[%s] Failed to sync completed files status: %s"
+                        .formatted(getRootId(), e.getMessage())));
+    }
+    
+    private void checkSyncComplete(int processed, int total, int synced, int notFound) {
+        if (processed >= total) {
+            log.info("[%s] Completed files sync finished. Synced: %d, Not found: %d"
+                    .formatted(getRootId(), synced, notFound));
+        }
     }
 }
