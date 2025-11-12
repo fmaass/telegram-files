@@ -986,23 +986,34 @@ public class TelegramVerticle extends AbstractVerticle {
                         
                         // Check if file exists on disk
                         if (StrUtil.isBlank(fileRecord.localPath()) || !FileUtil.exist(fileRecord.localPath())) {
-                            // File marked as completed but doesn't exist - reset to idle
-                            DataVerticle.fileRepository.updateDownloadStatus(
-                                    fileRecord.id(),
-                                    fileRecord.uniqueId(),
-                                    null,
-                                    FileRecord.DownloadStatus.idle,
-                                    null
-                            ).onSuccess(r -> {
-                                log.debug("[%s] Reset file status to idle (file not found): %s"
+                            // File marked as completed but doesn't exist
+                            // If it has a completionDate, it was downloaded in the past - keep it as completed
+                            // (user may have moved/deleted the file, but we want to preserve the "Downloaded" status)
+                            if (fileRecord.completionDate() != null && fileRecord.completionDate() > 0) {
+                                // File was downloaded in the past - keep status as completed even though file is gone
+                                log.debug("[%s] File was downloaded in the past but not found on disk (likely moved/deleted) - keeping as completed: %s"
                                         .formatted(getRootId(), fileRecord.uniqueId()));
-                                notFound.incrementAndGet();
+                                synced.incrementAndGet();
                                 checkSyncComplete(processed.incrementAndGet(), completedFiles.size(), synced.get(), notFound.get());
-                            })
-                            .onFailure(e -> {
-                                notFound.incrementAndGet();
-                                checkSyncComplete(processed.incrementAndGet(), completedFiles.size(), synced.get(), notFound.get());
-                            });
+                            } else {
+                                // File was never actually completed (no completionDate) - reset to idle
+                                DataVerticle.fileRepository.updateDownloadStatus(
+                                        fileRecord.id(),
+                                        fileRecord.uniqueId(),
+                                        null,
+                                        FileRecord.DownloadStatus.idle,
+                                        null
+                                ).onSuccess(r -> {
+                                    log.debug("[%s] Reset file status to idle (file not found and never completed): %s"
+                                            .formatted(getRootId(), fileRecord.uniqueId()));
+                                    notFound.incrementAndGet();
+                                    checkSyncComplete(processed.incrementAndGet(), completedFiles.size(), synced.get(), notFound.get());
+                                })
+                                .onFailure(e -> {
+                                    notFound.incrementAndGet();
+                                    checkSyncComplete(processed.incrementAndGet(), completedFiles.size(), synced.get(), notFound.get());
+                                });
+                            }
                             continue;
                         }
                         
