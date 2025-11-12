@@ -55,6 +55,11 @@ public class HttpVerticle extends AbstractVerticle {
     
     // telegramId -> timer ID for processing queue
     private final Map<Long, Long> queueTimerIds = new ConcurrentHashMap<>();
+    
+    // telegramId -> current batch being processed (file uniqueIds)
+    private final Map<Long, Set<String>> currentBatches = new ConcurrentHashMap<>();
+    
+    private static final int BATCH_SIZE = 10;
 
     private final List<String> unboundClients = new ArrayList<>();
 
@@ -702,7 +707,7 @@ public class HttpVerticle extends AbstractVerticle {
                             
                             // Start processing queue if not already running
                             if (!queueTimerIds.containsKey(telegramId)) {
-                                startQueueProcessor(telegramId, limit);
+                                startBatchProcessor(telegramId);
                             }
                         }
                         
@@ -727,42 +732,164 @@ public class HttpVerticle extends AbstractVerticle {
                 });
     }
     
-    private void startQueueProcessor(Long telegramId, int limit) {
+    private void startBatchProcessor(Long telegramId) {
         TelegramVerticle telegramVerticle = TelegramVerticles.getOrElseThrow(telegramId);
-        long timerId = vertx.setPeriodic(2000, id -> {
+        long timerId = vertx.setPeriodic(5000, id -> {
             Queue<JsonObject> queue = downloadQueues.get(telegramId);
-            if (queue == null || queue.isEmpty()) {
-                // Stop timer and clean up
+            Set<String> currentBatch = currentBatches.get(telegramId);
+            
+            // If queue is empty and no current batch, stop processing
+            if ((queue == null || queue.isEmpty()) && (currentBatch == null || currentBatch.isEmpty())) {
                 vertx.cancelTimer(id);
                 queueTimerIds.remove(telegramId);
                 downloadQueues.remove(telegramId);
+                currentBatches.remove(telegramId);
                 return;
             }
             
-            // Check current downloading count
-            DataVerticle.fileRepository.countByStatus(telegramId, FileRecord.DownloadStatus.downloading)
-                    .onSuccess(downloading -> {
-                        int currentDownloading = downloading != null ? downloading : 0;
-                        int surplus = Math.max(0, limit - currentDownloading);
-                        
-                        // Start up to surplus number of downloads from queue
-                        int toStart = Math.min(surplus, queue.size());
-                        for (int i = 0; i < toStart; i++) {
-                            JsonObject file = queue.poll();
-                            if (file == null) break;
-                            
-                            Long chatId = file.getLong("chatId");
-                            Long messageId = file.getLong("messageId");
-                            Integer fileId = file.getInteger("fileId");
-                            if (chatId != null && messageId != null && fileId != null) {
-                                telegramVerticle.startDownload(chatId, messageId, fileId)
-                                        .onFailure(e -> log.error("Failed to start queued download: %s".formatted(e.getMessage())));
-                            }
-                        }
-                    })
-                    .onFailure(e -> log.error("Failed to check download status for queue processor: %s".formatted(e.getMessage())));
+            // If we have a current batch, check if all files are completed
+            if (currentBatch != null && !currentBatch.isEmpty()) {
+                checkBatchCompletion(telegramId, currentBatch, queue, id);
+                return;
+            }
+            
+            // No current batch, start a new one
+            if (queue != null && !queue.isEmpty()) {
+                startNewBatch(telegramId, telegramVerticle, queue);
+            }
         });
         queueTimerIds.put(telegramId, timerId);
+    }
+    
+    private void startNewBatch(Long telegramId, TelegramVerticle telegramVerticle, Queue<JsonObject> queue) {
+        List<JsonObject> batchFiles = new ArrayList<>();
+        
+        // Take up to BATCH_SIZE files from queue
+        int batchCount = Math.min(BATCH_SIZE, queue.size());
+        for (int i = 0; i < batchCount; i++) {
+            JsonObject file = queue.poll();
+            if (file == null) break;
+            batchFiles.add(file);
+        }
+        
+        if (batchFiles.isEmpty()) {
+            return;
+        }
+        
+        log.info("Starting batch of %d files for telegramId %d".formatted(batchFiles.size(), telegramId));
+        
+        // Start all downloads in the batch and track them by uniqueId
+        for (JsonObject file : batchFiles) {
+            Long chatId = file.getLong("chatId");
+            Long messageId = file.getLong("messageId");
+            Integer fileId = file.getInteger("fileId");
+            if (chatId == null || messageId == null || fileId == null) {
+                continue;
+            }
+            
+            telegramVerticle.startDownload(chatId, messageId, fileId)
+                    .onSuccess(fileRecord -> {
+                        // Add to batch tracking using the uniqueId from the file record
+                        String uniqueId = fileRecord.uniqueId();
+                        if (StrUtil.isNotBlank(uniqueId)) {
+                            Set<String> currentBatch = currentBatches.computeIfAbsent(telegramId, k -> new HashSet<>());
+                            currentBatch.add(uniqueId);
+                            log.debug("Added to batch tracking: %s".formatted(uniqueId));
+                        }
+                    })
+                    .onFailure(e -> {
+                        log.error("Failed to start download in batch (chatId: %d, messageId: %d, fileId: %d): %s"
+                                .formatted(chatId, messageId, fileId, e.getMessage()));
+                        // If we can't start it, we should still mark it as "done" so the batch can proceed
+                        // But we need to track it somehow - use a temporary identifier
+                        String tempId = String.format("failed-%d-%d-%d", chatId, messageId, fileId);
+                        Set<String> currentBatch = currentBatches.computeIfAbsent(telegramId, k -> new HashSet<>());
+                        currentBatch.add(tempId);
+                        // Remove failed items immediately so they don't block the batch
+                        vertx.setTimer(1000, timerId -> {
+                            Set<String> batchSet = currentBatches.get(telegramId);
+                            if (batchSet != null) {
+                                batchSet.remove(tempId);
+                            }
+                        });
+                    });
+        }
+    }
+    
+    private void checkBatchCompletion(Long telegramId, Set<String> batch, Queue<JsonObject> queue, long timerId) {
+        if (batch == null || batch.isEmpty()) {
+            // Batch is empty, start next one if available
+            if (queue != null && !queue.isEmpty()) {
+                TelegramVerticle telegramVerticle = TelegramVerticles.getOrElseThrow(telegramId);
+                startNewBatch(telegramId, telegramVerticle, queue);
+            }
+            return;
+        }
+        
+        // Check status of all files in the current batch
+        DataVerticle.fileRepository.getFiles(0, Map.of(
+                "telegramId", String.valueOf(telegramId),
+                "limit", "1000"
+        ))
+                .onSuccess(result -> {
+                    List<FileRecord> allFiles = result.v1();
+                    Set<String> fileUniqueIds = new HashSet<>();
+                    for (FileRecord fileRecord : allFiles) {
+                        fileUniqueIds.add(fileRecord.uniqueId());
+                    }
+                    
+                    Set<String> completedOrFailed = new HashSet<>();
+                    
+                    // Check each file in the batch
+                    for (String uniqueId : new HashSet<>(batch)) {
+                        // Find the file record if it exists
+                        FileRecord fileRecord = allFiles.stream()
+                                .filter(f -> uniqueId.equals(f.uniqueId()))
+                                .findFirst()
+                                .orElse(null);
+                        
+                        if (fileRecord == null) {
+                            // File not found in database - might have failed to start
+                            // Check if it's a failed temp ID
+                            if (uniqueId.startsWith("failed-")) {
+                                // This was a failed start, remove it
+                                completedOrFailed.add(uniqueId);
+                            }
+                            // Otherwise, keep waiting (file might not be in DB yet)
+                            continue;
+                        }
+                        
+                        // Check if file is completed, failed, or idle (meaning it finished)
+                        // A file is "done" if it's NOT actively downloading or paused
+                        FileRecord.DownloadStatus status = FileRecord.DownloadStatus.valueOf(fileRecord.downloadStatus());
+                        if (status != FileRecord.DownloadStatus.downloading && 
+                            status != FileRecord.DownloadStatus.paused) {
+                            // File is completed, failed, or idle - consider it done
+                            completedOrFailed.add(uniqueId);
+                        }
+                    }
+                    
+                    // Remove completed/failed files from batch
+                    batch.removeAll(completedOrFailed);
+                    
+                    // If batch is empty, all files are done
+                    if (batch.isEmpty()) {
+                        log.info("Batch completed for telegramId %d. %d files finished. Starting next batch if available."
+                                .formatted(telegramId, completedOrFailed.size()));
+                        currentBatches.remove(telegramId);
+                        
+                        // If queue has more files, start next batch immediately
+                        if (queue != null && !queue.isEmpty()) {
+                            TelegramVerticle telegramVerticle = TelegramVerticles.getOrElseThrow(telegramId);
+                            startNewBatch(telegramId, telegramVerticle, queue);
+                        }
+                    } else {
+                        log.debug("Batch in progress for telegramId %d: %d/%d files remaining"
+                                .formatted(telegramId, batch.size(), BATCH_SIZE));
+                    }
+                })
+                .onFailure(e -> log.error("Failed to check batch completion for telegramId %d: %s"
+                        .formatted(telegramId, e.getMessage())));
     }
 
     private void handleFileCancelDownloadMultiple(RoutingContext ctx) {
