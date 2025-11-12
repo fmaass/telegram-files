@@ -1,0 +1,26 @@
+[2025-10-08 19:41:07] [INFO] Database sqlite initialized. 
+[2025-10-08 19:41:07] [INFO] API server started on port 8080 
+[2025-10-08 19:41:07] [INFO] Successfully deployed 0 telegram verticles 
+[2025-10-08 19:41:07] [INFO] Auto download verticle started!
+|History scan interval: 120000 ms
+|Download interval: 10000 ms
+|Download limit: 5 per telegram account!
+|Time limit: 
+|Auto chats: 0
+ 
+[2025-10-08 19:41:07] [INFO] Transfer verticle started!
+|History scan interval: 120000 ms
+|Transfer interval: 3000 ms
+|Auto chats: 0
+ 
+[2025-10-08 19:41:07] [INFO] Preload message verticle started!
+|History scan interval: 30000 ms
+|Auto chats: 0
+ 
+[2025-10-08 19:41:07] [INFO] 🚀 Start success 
+[2025-10-08 19:41:33] [INFO] 📥 Received SIGTERM signal 
+[2025-10-08 19:41:33] [INFO] Auto download verticle stopped! 
+[2025-10-08 19:41:33] [INFO] Preload message verticle stopped! 
+[2025-10-08 19:41:33] [INFO] Transfer verticle stopped 
+[2025-10-08 19:41:33] [INFO] Http verticle stopped! 
+[2025-10-08 19:41:33] [INFO] 👋 Shutdown success 

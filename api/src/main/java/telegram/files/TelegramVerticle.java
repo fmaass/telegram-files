@@ -1023,17 +1023,65 @@ public class TelegramVerticle extends AbstractVerticle {
                                                     checkSyncComplete(processed.incrementAndGet(), completedFiles.size(), synced.get(), notFound.get());
                                                 });
                                     } else {
-                                        // File not completed in Telegram - might need to be re-downloaded
-                                        // But if it exists on disk, keep it as completed
-                                        log.debug("[%s] File exists on disk but not in Telegram cache: %s"
+                                        // File not completed in Telegram cache, but exists on disk
+                                        // Keep it as completed since the file is actually there
+                                        log.debug("[%s] File exists on disk but not in Telegram cache - keeping as completed: %s"
                                                 .formatted(getRootId(), fileRecord.uniqueId()));
+                                        // Ensure completionDate is set if missing
+                                        Long completionDate = fileRecord.completionDate();
+                                        if (completionDate == null || completionDate == 0) {
+                                            // Set completionDate to file modification time or current time
+                                            try {
+                                                Path filePath = Path.of(fileRecord.localPath());
+                                                if (Files.exists(filePath)) {
+                                                    completionDate = Files.getLastModifiedTime(filePath).toMillis();
+                                                } else {
+                                                    completionDate = System.currentTimeMillis();
+                                                }
+                                                DataVerticle.fileRepository.updateDownloadStatus(
+                                                    fileRecord.id(),
+                                                    fileRecord.uniqueId(),
+                                                    fileRecord.localPath(),
+                                                    FileRecord.DownloadStatus.completed,
+                                                    completionDate
+                                                );
+                                            } catch (Exception ex) {
+                                                log.debug("[%s] Failed to set completionDate: %s"
+                                                        .formatted(getRootId(), ex.getMessage()));
+                                            }
+                                        }
+                                        synced.incrementAndGet();
                                         checkSyncComplete(processed.incrementAndGet(), completedFiles.size(), synced.get(), notFound.get());
                                     }
                                 })
                                 .onFailure(e -> {
-                                    // File might not be accessible - if it exists on disk, keep status
-                                    log.debug("[%s] Could not query file from Telegram (file exists on disk): %s"
+                                    // File might not be accessible from Telegram, but exists on disk
+                                    // Keep it as completed since the file is actually there
+                                    log.debug("[%s] Could not query file from Telegram (file exists on disk) - keeping as completed: %s"
                                             .formatted(getRootId(), fileRecord.uniqueId()));
+                                    // Ensure completionDate is set if missing
+                                    Long completionDate = fileRecord.completionDate();
+                                    if (completionDate == null || completionDate == 0) {
+                                        try {
+                                            Path filePath = Path.of(fileRecord.localPath());
+                                            if (Files.exists(filePath)) {
+                                                completionDate = Files.getLastModifiedTime(filePath).toMillis();
+                                            } else {
+                                                completionDate = System.currentTimeMillis();
+                                            }
+                                            DataVerticle.fileRepository.updateDownloadStatus(
+                                                fileRecord.id(),
+                                                fileRecord.uniqueId(),
+                                                fileRecord.localPath(),
+                                                FileRecord.DownloadStatus.completed,
+                                                completionDate
+                                            );
+                                        } catch (Exception ex) {
+                                            log.debug("[%s] Failed to set completionDate: %s"
+                                                    .formatted(getRootId(), ex.getMessage()));
+                                        }
+                                    }
+                                    synced.incrementAndGet();
                                     checkSyncComplete(processed.incrementAndGet(), completedFiles.size(), synced.get(), notFound.get());
                                 });
                     }
