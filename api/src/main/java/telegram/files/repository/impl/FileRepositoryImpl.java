@@ -732,4 +732,22 @@ public class FileRepositoryImpl extends AbstractSqlRepository implements FileRep
                 )
                 .mapEmpty();
     }
+
+    @Override
+    public Future<Long> getMinMessageId(long telegramId, long chatId) {
+        return SqlTemplate
+                .forQuery(sqlClient, """
+                        SELECT MIN(message_id) as min_msg_id
+                        FROM file_record
+                        WHERE telegram_id = #{telegramId}
+                          AND chat_id = #{chatId}
+                        """)
+                .mapTo(row -> {
+                    Long minMsgId = row.getLong("min_msg_id");
+                    return minMsgId != null ? minMsgId : 0L;
+                })
+                .execute(Map.of("telegramId", telegramId, "chatId", chatId))
+                .map(rs -> rs.size() > 0 ? rs.iterator().next() : 0L)
+                .onFailure(err -> log.error("Failed to get min message ID: %s".formatted(err.getMessage())));
+    }
 }

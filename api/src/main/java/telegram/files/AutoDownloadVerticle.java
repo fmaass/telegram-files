@@ -301,6 +301,25 @@ public class AutoDownloadVerticle extends AbstractVerticle {
                 log.debug("%s No more %s files found! Switch to %s".formatted(uniqueKey, nextFileType, params.nextFileType));
                 addHistoryMessage(params, callback, currentTimeMillis);
             } else {
+                // Check if nextFromMessageId is beyond newest message (should scan backwards)
+                // If we have a high nextFromMessageId but no messages, try scanning backwards
+                if (nextFromMessageId > 0) {
+                    Long oldestMsgId = Future.await(
+                        DataVerticle.fileRepository.getMinMessageId(telegramId, chatId)
+                    );
+                    
+                    if (oldestMsgId != null && oldestMsgId > 0 && nextFromMessageId > oldestMsgId) {
+                        // We're beyond the newest message, reset to scan backwards from oldest
+                        log.info("%s No messages found at nextFromMessageId %d (beyond newest). Resetting to scan backwards from oldest message %d"
+                            .formatted(uniqueKey, nextFromMessageId, oldestMsgId));
+                        params.nextFileType = rule.v2.getFirst(); // Reset to first file type
+                        params.nextFromMessageId = Math.max(0, oldestMsgId - 1000); // Start slightly before oldest
+                        addHistoryMessage(params, callback, currentTimeMillis);
+                        return;
+                    }
+                }
+                
+                // Only mark complete if we've truly exhausted all messages
                 log.debug("%s No more history files found! TelegramId: %d ChatId: %d".formatted(uniqueKey, telegramId, chatId));
                 callback.accept(new ScanResult(nextFileType, nextFromMessageId, true));
             }
@@ -349,6 +368,22 @@ public class AutoDownloadVerticle extends AbstractVerticle {
                                 log.info("History scan complete due to cutoff date for chat %d".formatted(chatId));
                                 callback.accept(new ScanResult(finalNextFileType, finalNextFromMessageId, true));
                             } else {
+                                // Check if nextFromMessageId from API is 0 (no more messages in this direction)
+                                // If we're scanning forwards and hit 0, try scanning backwards
+                                if (foundChatMessages.nextFromMessageId == 0 && nextFromMessageId > 0) {
+                                    Long oldestMsgId = Future.await(
+                                        DataVerticle.fileRepository.getMinMessageId(telegramId, chatId)
+                                    );
+                                    
+                                    if (oldestMsgId != null && oldestMsgId > 0 && nextFromMessageId > oldestMsgId) {
+                                        log.info("%s Hit end of forward scan at %d. Resetting to scan backwards from %d"
+                                            .formatted(uniqueKey, nextFromMessageId, oldestMsgId));
+                                        params.nextFileType = rule.v2.getFirst();
+                                        params.nextFromMessageId = Math.max(0, oldestMsgId - 1000);
+                                        addHistoryMessage(params, callback, currentTimeMillis);
+                                        return;
+                                    }
+                                }
                                 params.nextFromMessageId = foundChatMessages.nextFromMessageId;
                                 addHistoryMessage(params, callback, currentTimeMillis);
                             }
@@ -359,6 +394,22 @@ public class AutoDownloadVerticle extends AbstractVerticle {
                                 log.info("History scan complete due to cutoff date for chat %d".formatted(chatId));
                                 callback.accept(new ScanResult(finalNextFileType, finalNextFromMessageId, true));
                             } else if (shouldContinue) {
+                                // Check if nextFromMessageId from API is 0 (no more messages in this direction)
+                                // If we're scanning forwards and hit 0, try scanning backwards
+                                if (foundChatMessages.nextFromMessageId == 0 && nextFromMessageId > 0) {
+                                    Long oldestMsgId = Future.await(
+                                        DataVerticle.fileRepository.getMinMessageId(telegramId, chatId)
+                                    );
+                                    
+                                    if (oldestMsgId != null && oldestMsgId > 0 && nextFromMessageId > oldestMsgId) {
+                                        log.info("%s Hit end of forward scan at %d. Resetting to scan backwards from %d"
+                                            .formatted(uniqueKey, nextFromMessageId, oldestMsgId));
+                                        params.nextFileType = rule.v2.getFirst();
+                                        params.nextFromMessageId = Math.max(0, oldestMsgId - 1000);
+                                        addHistoryMessage(params, callback, currentTimeMillis);
+                                        return;
+                                    }
+                                }
                                 params.nextFromMessageId = foundChatMessages.nextFromMessageId;
                                 addHistoryMessage(params, callback, currentTimeMillis);
                             }

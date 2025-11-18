@@ -312,21 +312,56 @@ public class TelegramVerticle extends AbstractVerticle {
                     return DataVerticle.fileRepository.createIfNotExist(fileRecord)
                             .compose(created -> {
                                 if (!created) {
-                                    return DataVerticle.fileRepository.updateFileId(fileRecord.id(), fileRecord.uniqueId());
+                                    // FileRecord already exists, get it and update file ID if needed
+                                    return DataVerticle.fileRepository.getByUniqueId(fileRecord.uniqueId())
+                                            .compose(existingRecord -> {
+                                                if (existingRecord == null) {
+                                                    return Future.succeededFuture(fileRecord);
+                                                }
+                                                // Update file ID if needed
+                                                return DataVerticle.fileRepository.updateFileId(fileRecord.id(), fileRecord.uniqueId())
+                                                        .map(ignore -> existingRecord);
+                                            });
                                 }
-                                return Future.succeededFuture();
+                                // FileRecord was just created, return it
+                                return Future.succeededFuture(fileRecord);
                             })
-                            .compose(ignore -> client.execute(new TdApi.AddFileToDownloads(fileId, chatId, messageId, 32)))
-                            .onSuccess(ignore -> {
-                                sendEvent(EventPayload.build(EventPayload.TYPE_FILE_STATUS, new JsonObject()
-                                        .put("fileId", fileId)
-                                        .put("uniqueId", fileRecord.uniqueId())
-                                        .put("downloadStatus", FileRecord.DownloadStatus.downloading)
-                                ));
+                            .compose(record -> {
+                                // Check if we should start the download
+                                // Don't start if already downloading or completed
+                                if (record.isDownloadStatus(FileRecord.DownloadStatus.downloading) ||
+                                    record.isDownloadStatus(FileRecord.DownloadStatus.completed)) {
+                                    return Future.succeededFuture(record);
+                                }
+                                
+                                // Update status to downloading before starting (if it was idle)
+                                Future<FileRecord> statusUpdateFuture;
+                                if (record.isDownloadStatus(FileRecord.DownloadStatus.idle)) {
+                                    statusUpdateFuture = DataVerticle.fileRepository.updateDownloadStatus(
+                                            record.id(),
+                                            record.uniqueId(),
+                                            null,
+                                            FileRecord.DownloadStatus.downloading,
+                                            null
+                                    ).map(ignore -> record);
+                                } else {
+                                    statusUpdateFuture = Future.succeededFuture(record);
+                                }
+                                
+                                // Start the download
+                                return statusUpdateFuture
+                                        .compose(updatedRecord -> client.execute(new TdApi.AddFileToDownloads(fileId, chatId, messageId, 32))
+                                                .onSuccess(ignore -> {
+                                                    sendEvent(EventPayload.build(EventPayload.TYPE_FILE_STATUS, new JsonObject()
+                                                            .put("fileId", fileId)
+                                                            .put("uniqueId", updatedRecord.uniqueId())
+                                                            .put("downloadStatus", FileRecord.DownloadStatus.downloading)
+                                                    ));
 
-                                downloadThumbnail(chatId, messageId, fileHandler.convertThumbnailRecord(telegramRecord.id()));
-                            })
-                            .map(fileRecord);
+                                                    downloadThumbnail(chatId, messageId, fileHandler.convertThumbnailRecord(telegramRecord.id()));
+                                                })
+                                                .map(ignore -> updatedRecord));
+                            });
                 });
     }
 

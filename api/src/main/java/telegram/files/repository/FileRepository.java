@@ -54,4 +54,6 @@ public interface FileRepository {
     Future<Void> updateTags(String uniqueId, String tags);
 
     Future<Void> deleteByUniqueId(String uniqueId);
+
+    Future<Long> getMinMessageId(long telegramId, long chatId);
 }
