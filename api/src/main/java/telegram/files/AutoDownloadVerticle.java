@@ -303,20 +303,29 @@ public class AutoDownloadVerticle extends AbstractVerticle {
             } else {
                 // Check if nextFromMessageId is beyond newest message (should scan backwards)
                 // If we have a high nextFromMessageId but no messages, try scanning backwards
-                if (nextFromMessageId > 0) {
-                    Long oldestMsgId = Future.await(
-                        DataVerticle.fileRepository.getMinMessageId(telegramId, chatId)
-                    );
-                    
-                    if (oldestMsgId != null && oldestMsgId > 0 && nextFromMessageId > oldestMsgId) {
-                        // We're beyond the newest message, reset to scan backwards from oldest
-                        log.info("%s No messages found at nextFromMessageId %d (beyond newest). Resetting to scan backwards from oldest message %d"
-                            .formatted(uniqueKey, nextFromMessageId, oldestMsgId));
-                        params.nextFileType = rule.v2.getFirst(); // Reset to first file type
-                        params.nextFromMessageId = Math.max(0, oldestMsgId - 1000); // Start slightly before oldest
-                        addHistoryMessage(params, callback, currentTimeMillis);
-                        return;
-                    }
+                Long oldestMsgId = Future.await(
+                    DataVerticle.fileRepository.getMinMessageId(telegramId, chatId)
+                );
+                
+                // If we have files downloaded and nextFromMessageId is beyond the newest, reset to scan backwards
+                if (oldestMsgId != null && oldestMsgId > 0 && nextFromMessageId > oldestMsgId) {
+                    // We're beyond the newest message, reset to scan backwards from oldest
+                    log.info("%s No messages found at nextFromMessageId %d (beyond newest). Resetting to scan backwards from oldest message %d"
+                        .formatted(uniqueKey, nextFromMessageId, oldestMsgId));
+                    params.nextFileType = rule.v2.getFirst(); // Reset to first file type
+                    params.nextFromMessageId = Math.max(0, oldestMsgId - 1000); // Start slightly before oldest
+                    addHistoryMessage(params, callback, currentTimeMillis);
+                    return;
+                }
+                
+                // If nextFromMessageId is 0 and no files exist, start scanning from 0
+                // This handles the case when history scanning is first enabled
+                if (nextFromMessageId == 0 && (oldestMsgId == null || oldestMsgId == 0)) {
+                    log.debug("%s No files found yet, starting history scan from beginning. TelegramId: %d ChatId: %d"
+                        .formatted(uniqueKey, telegramId, chatId));
+                    // Keep nextFromMessageId at 0 to start scanning from the beginning
+                    callback.accept(new ScanResult(nextFileType, 0, false));
+                    return;
                 }
                 
                 // Only mark complete if we've truly exhausted all messages
