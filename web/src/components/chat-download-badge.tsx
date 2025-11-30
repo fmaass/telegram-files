@@ -25,7 +25,9 @@ export function ChatDownloadBadge() {
       ? `/telegram/${accountId}/chat/${chatId}/statistics`
       : null,
     {
-      refreshInterval: 5000, // Refresh every 5 seconds
+      refreshInterval: 30000, // Refresh every 30 seconds (reduced from 5s to avoid DB load)
+      dedupingInterval: 10000, // Prevent duplicate requests within 10s
+      revalidateOnFocus: false, // Don't revalidate when window regains focus
     },
   );
 
