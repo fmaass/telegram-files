@@ -36,6 +36,7 @@ import { Toggle } from "@/components/ui/toggle";
 import { useLocalStorage } from "@/hooks/use-local-storage";
 import { useTelegramChat } from "@/hooks/use-telegram-chat";
 import { useSettings } from "@/hooks/use-settings";
+import { ChatDownloadBadge } from "@/components/chat-download-badge";
 
 export function MobileHeader() {
   const { accountDownloadSpeed } = useWebsocket();
@@ -73,16 +74,20 @@ export function MobileHeader() {
             <TelegramIcon className="h-6 w-6" />
           </Link>
 
-          {accountDownloadSpeed !== 0 ? (
-            <div className="flex items-center gap-2 overflow-hidden text-sm text-muted-foreground">
-              <span className="flex-1 text-nowrap">
-                {`${prettyBytes(accountDownloadSpeed, { bits: settings?.speedUnits === "bits" })}/s`}
-              </span>
-              <Download className="h-4 w-4 flex-shrink-0" />
-            </div>
-          ) : (
-            <h3 className="text-lg font-semibold">Telegram File Manager</h3>
-          )}
+          <div className="flex items-center gap-2">
+            <ChatDownloadBadge />
+            {accountDownloadSpeed !== 0 ? (
+              <div className="flex items-center gap-2 overflow-hidden text-sm text-muted-foreground">
+                <span className="flex-1 text-nowrap">
+                  {`${prettyBytes(accountDownloadSpeed, { bits: settings?.speedUnits === "bits" })}/s`}
+                </span>
+                <Download className="h-4 w-4 flex-shrink-0" />
+              </div>
+            ) : (
+              <h3 className="text-lg font-semibold">Telegram File Manager</h3>
+            )}
+          </div>
+>>>>>>> 8a52f04 (Add chat download progress badge with history cutoff support)
 
           <MenuDrawer />
         </div>
