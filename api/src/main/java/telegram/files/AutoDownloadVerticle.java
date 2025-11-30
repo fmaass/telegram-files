@@ -166,8 +166,9 @@ public class AutoDownloadVerticle extends AbstractVerticle {
         }
         scanThreads.removeIf(scanThread -> scanThread.isComplete);
         
-        // Compute sentinel message ID once if historySince is provided
+        // Compute sentinel message date once if historySince is provided
         Long sentinelMessageId = null;
+        Integer sentinelMessageDate = null;
         if (auto.download.rule.historySince != null && auto.download.rule.historySince > 0) {
             try {
                 TelegramVerticle telegramVerticle = TelegramVerticles.getOrElseThrow(auto.telegramId);
@@ -178,8 +179,9 @@ public class AutoDownloadVerticle extends AbstractVerticle {
                 );
                 if (sentinelMessage != null) {
                     sentinelMessageId = sentinelMessage.id;
-                    log.info("History cutoff enabled for comment messages in chat %d: sentinel message ID = %d (date: %d)"
-                        .formatted(auto.chatId, sentinelMessageId, auto.download.rule.historySince));
+                    sentinelMessageDate = sentinelMessage.date;
+                    log.info("History cutoff enabled for comment messages in chat %d: sentinel message ID = %d, date = %d (cutoff date: %d)"
+                        .formatted(auto.chatId, sentinelMessageId, sentinelMessageDate, auto.download.rule.historySince));
                 }
             } catch (Exception e) {
                 log.warn("Failed to get sentinel message for comment history cutoff: %s".formatted(e.getMessage()));
@@ -187,6 +189,7 @@ public class AutoDownloadVerticle extends AbstractVerticle {
         }
         
         Long finalSentinelMessageId = sentinelMessageId;
+        Integer finalSentinelMessageDate = sentinelMessageDate;
         waitingScanThreads.get(auto.telegramId).forEach(scanThread -> {
             ScanParams scanParams = new ScanParams(auto.uniqueKey() + ":" + scanThread.messageThreadId,
                     auto.download.rule,
@@ -196,6 +199,7 @@ public class AutoDownloadVerticle extends AbstractVerticle {
                     scanThread.nextFromMessageId);
             scanParams.messageThreadId = scanThread.messageThreadId;
             scanParams.sentinelMessageId = finalSentinelMessageId;
+            scanParams.sentinelMessageDate = finalSentinelMessageDate;
             addHistoryMessage(scanParams,
                     result -> {
                         scanThread.nextFileType = result.nextFileType;
@@ -217,7 +221,7 @@ public class AutoDownloadVerticle extends AbstractVerticle {
                 auto.download.nextFileType,
                 auto.download.nextFromMessageId);
         
-        // Compute sentinel message ID if historySince is provided
+        // Compute sentinel message date if historySince is provided
         if (auto.download.rule.historySince != null && auto.download.rule.historySince > 0) {
             try {
                 TelegramVerticle telegramVerticle = TelegramVerticles.getOrElseThrow(auto.telegramId);
@@ -228,8 +232,9 @@ public class AutoDownloadVerticle extends AbstractVerticle {
                 );
                 if (sentinelMessage != null) {
                     params.sentinelMessageId = sentinelMessage.id;
-                    log.info("History cutoff enabled for chat %d: sentinel message ID = %d (date: %d)"
-                        .formatted(auto.chatId, params.sentinelMessageId, auto.download.rule.historySince));
+                    params.sentinelMessageDate = sentinelMessage.date;
+                    log.info("History cutoff enabled for chat %d: sentinel message ID = %d, date = %d (cutoff date: %d)"
+                        .formatted(auto.chatId, params.sentinelMessageId, params.sentinelMessageDate, auto.download.rule.historySince));
                 }
             } catch (Exception e) {
                 log.warn("Failed to get sentinel message for history cutoff: %s".formatted(e.getMessage()));
@@ -311,6 +316,34 @@ public class AutoDownloadVerticle extends AbstractVerticle {
                 log.debug("%s No more %s files found! Switch to %s".formatted(uniqueKey, nextFileType, params.nextFileType));
                 addHistoryMessage(params, callback, currentTimeMillis);
             } else {
+                // Check if nextFromMessageId is beyond newest message (should scan backwards)
+                // If we have a high nextFromMessageId but no messages, try scanning backwards
+                Long oldestMsgId = Future.await(
+                    DataVerticle.fileRepository.getMinMessageId(telegramId, chatId)
+                );
+                
+                // If we have files downloaded and nextFromMessageId is beyond the newest, reset to scan backwards
+                if (oldestMsgId != null && oldestMsgId > 0 && nextFromMessageId > oldestMsgId) {
+                    // We're beyond the newest message, reset to scan backwards from oldest
+                    log.info("%s No messages found at nextFromMessageId %d (beyond newest). Resetting to scan backwards from oldest message %d"
+                        .formatted(uniqueKey, nextFromMessageId, oldestMsgId));
+                    params.nextFileType = rule.v2.getFirst(); // Reset to first file type
+                    params.nextFromMessageId = Math.max(0, oldestMsgId - 1000); // Start slightly before oldest
+                    addHistoryMessage(params, callback, currentTimeMillis);
+                    return;
+                }
+                
+                // If nextFromMessageId is 0 and no files exist, start scanning from 0
+                // This handles the case when history scanning is first enabled
+                if (nextFromMessageId == 0 && (oldestMsgId == null || oldestMsgId == 0)) {
+                    log.debug("%s No files found yet, starting history scan from beginning. TelegramId: %d ChatId: %d"
+                        .formatted(uniqueKey, telegramId, chatId));
+                    // Keep nextFromMessageId at 0 to start scanning from the beginning
+                    callback.accept(new ScanResult(nextFileType, 0, false));
+                    return;
+                }
+                
+                // Only mark complete if we've truly exhausted all messages
                 log.debug("%s No more history files found! TelegramId: %d ChatId: %d".formatted(uniqueKey, telegramId, chatId));
                 callback.accept(new ScanResult(nextFileType, nextFromMessageId, true));
             }
@@ -319,12 +352,13 @@ public class AutoDownloadVerticle extends AbstractVerticle {
             
             // Check if we've reached the history cutoff date
             final boolean reachedCutoff;
-            if (params.sentinelMessageId != null && foundChatMessages.messages.length > 0) {
-                long oldestMessageId = foundChatMessages.messages[foundChatMessages.messages.length - 1].id;
-                if (oldestMessageId <= params.sentinelMessageId) {
+            if (params.sentinelMessageDate != null && foundChatMessages.messages.length > 0) {
+                // Check the oldest message date (last in array since messages are sorted newest first)
+                int oldestMessageDate = foundChatMessages.messages[foundChatMessages.messages.length - 1].date;
+                if (oldestMessageDate < params.sentinelMessageDate) {
                     reachedCutoff = true;
-                    log.info("Reached history cutoff at message ID %d (sentinel: %d) for chat %d"
-                        .formatted(oldestMessageId, params.sentinelMessageId, chatId));
+                    log.info("Reached history cutoff at message date %d (sentinel date: %d) for chat %d"
+                        .formatted(oldestMessageDate, params.sentinelMessageDate, chatId));
                 } else {
                     reachedCutoff = false;
                 }
@@ -341,8 +375,8 @@ public class AutoDownloadVerticle extends AbstractVerticle {
                                 .parallel()
                                 .filter(predicate)
                                 .filter(message -> {
-                                    // Filter out messages older than the sentinel
-                                    if (params.sentinelMessageId != null && message.id < params.sentinelMessageId) {
+                                    // Filter out messages older than the sentinel date (use date, not ID)
+                                    if (params.sentinelMessageDate != null && message.date < params.sentinelMessageDate) {
                                         return false;
                                     }
                                     
@@ -362,6 +396,22 @@ public class AutoDownloadVerticle extends AbstractVerticle {
                                 log.info("History scan complete due to cutoff date for chat %d".formatted(chatId));
                                 callback.accept(new ScanResult(finalNextFileType, finalNextFromMessageId, true));
                             } else {
+                                // Check if nextFromMessageId from API is 0 (no more messages in this direction)
+                                // If we're scanning forwards and hit 0, try scanning backwards
+                                if (foundChatMessages.nextFromMessageId == 0 && nextFromMessageId > 0) {
+                                    Long oldestMsgId = Future.await(
+                                        DataVerticle.fileRepository.getMinMessageId(telegramId, chatId)
+                                    );
+                                    
+                                    if (oldestMsgId != null && oldestMsgId > 0 && nextFromMessageId > oldestMsgId) {
+                                        log.info("%s Hit end of forward scan at %d. Resetting to scan backwards from %d"
+                                            .formatted(uniqueKey, nextFromMessageId, oldestMsgId));
+                                        params.nextFileType = rule.v2.getFirst();
+                                        params.nextFromMessageId = Math.max(0, oldestMsgId - 1000);
+                                        addHistoryMessage(params, callback, currentTimeMillis);
+                                        return;
+                                    }
+                                }
                                 params.nextFromMessageId = foundChatMessages.nextFromMessageId;
                                 addHistoryMessage(params, callback, currentTimeMillis);
                             }
@@ -372,6 +422,22 @@ public class AutoDownloadVerticle extends AbstractVerticle {
                                 log.info("History scan complete due to cutoff date for chat %d".formatted(chatId));
                                 callback.accept(new ScanResult(finalNextFileType, finalNextFromMessageId, true));
                             } else if (shouldContinue) {
+                                // Check if nextFromMessageId from API is 0 (no more messages in this direction)
+                                // If we're scanning forwards and hit 0, try scanning backwards
+                                if (foundChatMessages.nextFromMessageId == 0 && nextFromMessageId > 0) {
+                                    Long oldestMsgId = Future.await(
+                                        DataVerticle.fileRepository.getMinMessageId(telegramId, chatId)
+                                    );
+                                    
+                                    if (oldestMsgId != null && oldestMsgId > 0 && nextFromMessageId > oldestMsgId) {
+                                        log.info("%s Hit end of forward scan at %d. Resetting to scan backwards from %d"
+                                            .formatted(uniqueKey, nextFromMessageId, oldestMsgId));
+                                        params.nextFileType = rule.v2.getFirst();
+                                        params.nextFromMessageId = Math.max(0, oldestMsgId - 1000);
+                                        addHistoryMessage(params, callback, currentTimeMillis);
+                                        return;
+                                    }
+                                }
                                 params.nextFromMessageId = foundChatMessages.nextFromMessageId;
                                 addHistoryMessage(params, callback, currentTimeMillis);
                             }
@@ -538,6 +604,7 @@ public class AutoDownloadVerticle extends AbstractVerticle {
         public long nextFromMessageId;
 
         public Long sentinelMessageId;
+        public Integer sentinelMessageDate;
 
         public ScanParams(String uniqueKey,
                           SettingAutoRecords.DownloadRule rule,

@@ -328,6 +328,7 @@ public class FileRepositoryImpl extends AbstractSqlRepository implements FileRep
                                COUNT(CASE WHEN download_status = 'paused' THEN 1 END)                       AS paused,
                                COUNT(CASE WHEN download_status = 'completed' THEN 1 END)                    AS completed,
                                COUNT(CASE WHEN download_status = 'error' THEN 1 END)                        AS error,
+                               COUNT(CASE WHEN download_status = 'idle' THEN 1 END)                         AS idle,
                                COUNT(CASE WHEN download_status = 'completed' and type = 'photo' THEN 1 END) AS photo,
                                COUNT(CASE WHEN download_status = 'completed' and type = 'video' THEN 1 END) AS video,
                                COUNT(CASE WHEN download_status = 'completed' and type = 'audio' THEN 1 END) AS audio,
@@ -342,6 +343,7 @@ public class FileRepositoryImpl extends AbstractSqlRepository implements FileRep
                     result.put("paused", row.getInteger("paused"));
                     result.put("completed", row.getInteger("completed"));
                     result.put("error", row.getInteger("error"));
+                    result.put("idle", row.getInteger("idle"));
                     result.put("photo", row.getInteger("photo"));
                     result.put("video", row.getInteger("video"));
                     result.put("audio", row.getInteger("audio"));
@@ -351,6 +353,34 @@ public class FileRepositoryImpl extends AbstractSqlRepository implements FileRep
                 .execute(Map.of("telegramId", telegramId))
                 .map(rs -> rs.size() > 0 ? rs.iterator().next() : JsonObject.of())
                 .onFailure(err -> log.error("Failed to get download statistics: %s".formatted(err.getMessage())));
+    }
+
+    @Override
+    public Future<JsonObject> getChatDownloadStatistics(long telegramId, long chatId) {
+        return SqlTemplate
+                .forQuery(sqlClient, """
+                        SELECT COUNT(*)                                                                     AS total,
+                               COUNT(CASE WHEN download_status = 'downloading' THEN 1 END)                  AS downloading,
+                               COUNT(CASE WHEN download_status = 'paused' THEN 1 END)                       AS paused,
+                               COUNT(CASE WHEN download_status = 'completed' THEN 1 END)                    AS completed,
+                               COUNT(CASE WHEN download_status = 'error' THEN 1 END)                        AS error,
+                               COUNT(CASE WHEN download_status = 'idle' THEN 1 END)                         AS idle
+                        FROM file_record
+                        WHERE telegram_id = #{telegramId} AND chat_id = #{chatId} AND type != 'thumbnail'
+                        """)
+                .mapTo(row -> {
+                    JsonObject result = JsonObject.of();
+                    result.put("total", row.getInteger("total"));
+                    result.put("downloading", row.getInteger("downloading"));
+                    result.put("paused", row.getInteger("paused"));
+                    result.put("completed", row.getInteger("completed"));
+                    result.put("error", row.getInteger("error"));
+                    result.put("idle", row.getInteger("idle"));
+                    return result;
+                })
+                .execute(Map.of("telegramId", telegramId, "chatId", chatId))
+                .map(rs -> rs.size() > 0 ? rs.iterator().next() : JsonObject.of())
+                .onFailure(err -> log.error("Failed to get chat download statistics: %s".formatted(err.getMessage())));
     }
 
     @Override
@@ -731,5 +761,23 @@ public class FileRepositoryImpl extends AbstractSqlRepository implements FileRep
                 .onFailure(err -> log.error("Failed to delete file record: %s".formatted(err.getMessage()))
                 )
                 .mapEmpty();
+    }
+
+    @Override
+    public Future<Long> getMinMessageId(long telegramId, long chatId) {
+        return SqlTemplate
+                .forQuery(sqlClient, """
+                        SELECT MIN(message_id) as min_msg_id
+                        FROM file_record
+                        WHERE telegram_id = #{telegramId}
+                          AND chat_id = #{chatId}
+                        """)
+                .mapTo(row -> {
+                    Long minMsgId = row.getLong("min_msg_id");
+                    return minMsgId != null ? minMsgId : 0L;
+                })
+                .execute(Map.of("telegramId", telegramId, "chatId", chatId))
+                .map(rs -> rs.size() > 0 ? rs.iterator().next() : 0L)
+                .onFailure(err -> log.error("Failed to get min message ID: %s".formatted(err.getMessage())));
     }
 }

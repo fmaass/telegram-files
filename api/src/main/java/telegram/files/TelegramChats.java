@@ -33,14 +33,27 @@ public class TelegramChats {
         this.client = client;
     }
 
-    public List<TdApi.Chat> getChatList(Long activatedChatId, String query, int limit, boolean archived) {
-        List<TdApi.Chat> chatList = (archived ? archivedChatList : mainChatList).stream()
+    public List<TdApi.Chat> getChatList(Long activatedChatId, String query, int limit, boolean archived, java.util.Set<Long> priorityChatIds) {
+        java.util.stream.Stream<TdApi.Chat> chatStream = (archived ? archivedChatList : mainChatList).stream()
                 .map(OrderedChat::chatId)
                 .map(chats::get)
                 .filter(Objects::nonNull)
-                .filter(chat -> StrUtil.isBlank(query) || chat.title.contains(query))
-                .limit(limit)
-                .collect(Collectors.toList());
+                .filter(chat -> StrUtil.isBlank(query) || StrUtil.containsIgnoreCase(chat.title, query));
+
+        List<TdApi.Chat> chatList;
+        if (priorityChatIds != null && !priorityChatIds.isEmpty()) {
+            List<TdApi.Chat> allChats = chatStream.collect(Collectors.toList());
+            allChats.sort((c1, c2) -> {
+                boolean p1 = priorityChatIds.contains(c1.id);
+                boolean p2 = priorityChatIds.contains(c2.id);
+                if (p1 && !p2) return -1;
+                if (!p1 && p2) return 1;
+                return 0;
+            });
+            chatList = allChats.stream().limit(limit).collect(Collectors.toList());
+        } else {
+            chatList = chatStream.limit(limit).collect(Collectors.toList());
+        }
 
         if (activatedChatId != null) {
             TdApi.Chat activatedChat = chats.get(activatedChatId);
