@@ -29,7 +29,7 @@ public interface FileRepository {
 
     Future<JsonObject> getDownloadStatistics(long telegramId);
 
-    Future<JsonObject> getChatDownloadStatistics(long telegramId, long chatId);
+    Future<JsonObject> getChatDownloadStatistics(long telegramId, long chatId, Integer historySince);
 
     Future<JsonObject> getDownloadStatistics();
 

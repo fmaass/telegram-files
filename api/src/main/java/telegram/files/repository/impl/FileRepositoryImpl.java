@@ -356,18 +356,35 @@ public class FileRepositoryImpl extends AbstractSqlRepository implements FileRep
     }
 
     @Override
-    public Future<JsonObject> getChatDownloadStatistics(long telegramId, long chatId) {
+    public Future<JsonObject> getChatDownloadStatistics(long telegramId, long chatId, Integer historySince) {
+        // Build query with optional history cutoff filter
+        String query = historySince != null ? """
+                SELECT COUNT(*)                                                                     AS total,
+                       COUNT(CASE WHEN download_status = 'downloading' THEN 1 END)                  AS downloading,
+                       COUNT(CASE WHEN download_status = 'paused' THEN 1 END)                       AS paused,
+                       COUNT(CASE WHEN download_status = 'completed' THEN 1 END)                    AS completed,
+                       COUNT(CASE WHEN download_status = 'error' THEN 1 END)                        AS error,
+                       COUNT(CASE WHEN download_status = 'idle' THEN 1 END)                         AS idle
+                FROM file_record
+                WHERE telegram_id = #{telegramId} AND chat_id = #{chatId} AND type != 'thumbnail'
+                  AND date >= #{historySince}
+                """ : """
+                SELECT COUNT(*)                                                                     AS total,
+                       COUNT(CASE WHEN download_status = 'downloading' THEN 1 END)                  AS downloading,
+                       COUNT(CASE WHEN download_status = 'paused' THEN 1 END)                       AS paused,
+                       COUNT(CASE WHEN download_status = 'completed' THEN 1 END)                    AS completed,
+                       COUNT(CASE WHEN download_status = 'error' THEN 1 END)                        AS error,
+                       COUNT(CASE WHEN download_status = 'idle' THEN 1 END)                         AS idle
+                FROM file_record
+                WHERE telegram_id = #{telegramId} AND chat_id = #{chatId} AND type != 'thumbnail'
+                """;
+        
+        Map<String, Object> params = historySince != null ?
+                Map.of("telegramId", telegramId, "chatId", chatId, "historySince", historySince) :
+                Map.of("telegramId", telegramId, "chatId", chatId);
+        
         return SqlTemplate
-                .forQuery(sqlClient, """
-                        SELECT COUNT(*)                                                                     AS total,
-                               COUNT(CASE WHEN download_status = 'downloading' THEN 1 END)                  AS downloading,
-                               COUNT(CASE WHEN download_status = 'paused' THEN 1 END)                       AS paused,
-                               COUNT(CASE WHEN download_status = 'completed' THEN 1 END)                    AS completed,
-                               COUNT(CASE WHEN download_status = 'error' THEN 1 END)                        AS error,
-                               COUNT(CASE WHEN download_status = 'idle' THEN 1 END)                         AS idle
-                        FROM file_record
-                        WHERE telegram_id = #{telegramId} AND chat_id = #{chatId} AND type != 'thumbnail'
-                        """)
+                .forQuery(sqlClient, query)
                 .mapTo(row -> {
                     JsonObject result = JsonObject.of();
                     result.put("total", row.getInteger("total"));
@@ -378,7 +395,7 @@ public class FileRepositoryImpl extends AbstractSqlRepository implements FileRep
                     result.put("idle", row.getInteger("idle"));
                     return result;
                 })
-                .execute(Map.of("telegramId", telegramId, "chatId", chatId))
+                .execute(params)
                 .map(rs -> rs.size() > 0 ? rs.iterator().next() : JsonObject.of())
                 .onFailure(err -> log.error("Failed to get chat download statistics: %s".formatted(err.getMessage())));
     }

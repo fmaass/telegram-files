@@ -263,7 +263,13 @@ public class TelegramVerticle extends AbstractVerticle {
     }
 
     public Future<JsonObject> getChatDownloadStatistics(long chatId) {
-        return DataVerticle.fileRepository.getChatDownloadStatistics(this.telegramRecord.id(), chatId);
+        // Get automation config to check for history cutoff
+        Integer historySince = null;
+        var automation = AutomationsHolder.INSTANCE.autoRecords().getItems(this.telegramRecord.id()).get(chatId);
+        if (automation != null && automation.download != null && automation.download.rule != null) {
+            historySince = automation.download.rule.historySince;
+        }
+        return DataVerticle.fileRepository.getChatDownloadStatistics(this.telegramRecord.id(), chatId, historySince);
     }
 
     public Future<JsonObject> parseLink(String link) {

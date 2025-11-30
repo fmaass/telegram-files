@@ -24,6 +24,7 @@ import { Button } from "@/components/ui/button";
 import ThemeToggleButton from "@/components/theme-toggle-button";
 import AccountSelect from "@/components/account-select";
 import { useSearchParams } from "next/navigation";
+import { ChatDownloadBadge } from "@/components/chat-download-badge";
 
 export function Header() {
   const useTelegramAccountProps = useTelegramAccount();
@@ -66,6 +67,8 @@ export function Header() {
                 </div>
               </TooltipWrapper>
             )}
+
+            <ChatDownloadBadge />
 
             {connectionStatus && (
               <TooltipWrapper content="WebSocket connection status">
