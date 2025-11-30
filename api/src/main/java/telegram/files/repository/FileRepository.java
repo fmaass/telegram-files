@@ -29,6 +29,8 @@ public interface FileRepository {
 
     Future<JsonObject> getDownloadStatistics(long telegramId);
 
+    Future<JsonObject> getChatDownloadStatistics(long telegramId, long chatId);
+
     Future<JsonObject> getDownloadStatistics();
 
     Future<JsonArray> getCompletedRangeStatistics(long id, long startTime, long endTime, int timeRange);
@@ -54,4 +56,6 @@ public interface FileRepository {
     Future<Void> updateTags(String uniqueId, String tags);
 
     Future<Void> deleteByUniqueId(String uniqueId);
+
+    Future<Long> getMinMessageId(long telegramId, long chatId);
 }

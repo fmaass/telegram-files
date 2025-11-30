@@ -28,9 +28,13 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.attribute.FileTime;
 import java.util.Arrays;
+import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
+import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 public class TelegramVerticle extends AbstractVerticle {
@@ -171,7 +175,11 @@ public class TelegramVerticle extends AbstractVerticle {
     }
 
     public Future<JsonArray> getChats(Long activatedChatId, String query, boolean archived) {
-        return TelegramConverter.convertChat(this.telegramRecord.id(), telegramChats.getChatList(activatedChatId, query, 100, archived));
+        Set<Long> enabledChatIds = AutomationsHolder.INSTANCE.autoRecords().getDownloadEnabledItems().stream()
+                .filter(item -> item.telegramId == this.telegramRecord.id())
+                .map(item -> item.chatId)
+                .collect(Collectors.toSet());
+        return TelegramConverter.convertChat(this.telegramRecord.id(), telegramChats.getChatList(activatedChatId, query, 100, archived, enabledChatIds));
     }
 
     public TdApi.Chat getChat(long chatId) {
@@ -254,6 +262,10 @@ public class TelegramVerticle extends AbstractVerticle {
         });
     }
 
+    public Future<JsonObject> getChatDownloadStatistics(long chatId) {
+        return DataVerticle.fileRepository.getChatDownloadStatistics(this.telegramRecord.id(), chatId);
+    }
+
     public Future<JsonObject> parseLink(String link) {
         return client.execute(new TdApi.GetMessageLinkInfo(link))
                 .compose(messageLinkInfo -> {
@@ -310,21 +322,56 @@ public class TelegramVerticle extends AbstractVerticle {
                     return DataVerticle.fileRepository.createIfNotExist(fileRecord)
                             .compose(created -> {
                                 if (!created) {
-                                    return DataVerticle.fileRepository.updateFileId(fileRecord.id(), fileRecord.uniqueId());
+                                    // FileRecord already exists, get it and update file ID if needed
+                                    return DataVerticle.fileRepository.getByUniqueId(fileRecord.uniqueId())
+                                            .compose(existingRecord -> {
+                                                if (existingRecord == null) {
+                                                    return Future.succeededFuture(fileRecord);
+                                                }
+                                                // Update file ID if needed
+                                                return DataVerticle.fileRepository.updateFileId(fileRecord.id(), fileRecord.uniqueId())
+                                                        .map(ignore -> existingRecord);
+                                            });
                                 }
-                                return Future.succeededFuture();
+                                // FileRecord was just created, return it
+                                return Future.succeededFuture(fileRecord);
                             })
-                            .compose(ignore -> client.execute(new TdApi.AddFileToDownloads(fileId, chatId, messageId, 32)))
-                            .onSuccess(ignore -> {
-                                sendEvent(EventPayload.build(EventPayload.TYPE_FILE_STATUS, new JsonObject()
-                                        .put("fileId", fileId)
-                                        .put("uniqueId", fileRecord.uniqueId())
-                                        .put("downloadStatus", FileRecord.DownloadStatus.downloading)
-                                ));
+                            .compose(record -> {
+                                // Check if we should start the download
+                                // Don't start if already downloading or completed
+                                if (record.isDownloadStatus(FileRecord.DownloadStatus.downloading) ||
+                                    record.isDownloadStatus(FileRecord.DownloadStatus.completed)) {
+                                    return Future.succeededFuture(record);
+                                }
+                                
+                                // Update status to downloading before starting (if it was idle)
+                                Future<FileRecord> statusUpdateFuture;
+                                if (record.isDownloadStatus(FileRecord.DownloadStatus.idle)) {
+                                    statusUpdateFuture = DataVerticle.fileRepository.updateDownloadStatus(
+                                            record.id(),
+                                            record.uniqueId(),
+                                            null,
+                                            FileRecord.DownloadStatus.downloading,
+                                            null
+                                    ).map(ignore -> record);
+                                } else {
+                                    statusUpdateFuture = Future.succeededFuture(record);
+                                }
+                                
+                                // Start the download
+                                return statusUpdateFuture
+                                        .compose(updatedRecord -> client.execute(new TdApi.AddFileToDownloads(fileId, chatId, messageId, 32))
+                                                .onSuccess(ignore -> {
+                                                    sendEvent(EventPayload.build(EventPayload.TYPE_FILE_STATUS, new JsonObject()
+                                                            .put("fileId", fileId)
+                                                            .put("uniqueId", updatedRecord.uniqueId())
+                                                            .put("downloadStatus", FileRecord.DownloadStatus.downloading)
+                                                    ));
 
-                                downloadThumbnail(chatId, messageId, fileHandler.convertThumbnailRecord(telegramRecord.id()));
-                            })
-                            .map(fileRecord);
+                                                    downloadThumbnail(chatId, messageId, fileHandler.convertThumbnailRecord(telegramRecord.id()));
+                                                })
+                                                .map(ignore -> updatedRecord));
+                            });
                 });
     }
 
@@ -771,6 +818,8 @@ public class TelegramVerticle extends AbstractVerticle {
                 sendEvent(EventPayload.build(EventPayload.TYPE_AUTHORIZATION, authorizationState));
                 telegramChats.loadMainChatList();
                 telegramChats.loadArchivedChatList();
+                // Sync download status for files marked as completed in database
+                syncCompletedFilesStatus();
                 break;
             case TdApi.AuthorizationStateLoggingOut.CONSTRUCTOR:
                 break;
@@ -944,5 +993,177 @@ public class TelegramVerticle extends AbstractVerticle {
                         return Future.failedFuture("File is already downloaded successfully");
                     }
                 });
+    }
+    
+    private void syncCompletedFilesStatus() {
+        if (telegramRecord == null) {
+            return;
+        }
+        
+        log.info("[%s] Starting sync of completed files status...".formatted(getRootId()));
+        
+        // Get completed files in batches to avoid loading too many at once
+        Map<String, String> filter = new HashMap<>();
+        filter.put("downloadStatus", FileRecord.DownloadStatus.completed.name());
+        filter.put("limit", "100"); // Process in batches of 100
+        
+        DataVerticle.fileRepository.getFiles(0, filter)
+                .onSuccess(result -> {
+                    List<FileRecord> completedFiles = result.v1();
+                    if (completedFiles.isEmpty()) {
+                        log.debug("[%s] No completed files to sync".formatted(getRootId()));
+                        return;
+                    }
+                    
+                    log.info("[%s] Syncing %d completed files...".formatted(getRootId(), completedFiles.size()));
+                    
+                    // Use AtomicInteger for thread-safe counting in async callbacks
+                    java.util.concurrent.atomic.AtomicInteger synced = new java.util.concurrent.atomic.AtomicInteger(0);
+                    java.util.concurrent.atomic.AtomicInteger notFound = new java.util.concurrent.atomic.AtomicInteger(0);
+                    java.util.concurrent.atomic.AtomicInteger processed = new java.util.concurrent.atomic.AtomicInteger(0);
+                    
+                    for (FileRecord fileRecord : completedFiles) {
+                        // Skip if file doesn't belong to this telegram account
+                        if (fileRecord.telegramId() != telegramRecord.id()) {
+                            processed.incrementAndGet();
+                            continue;
+                        }
+                        
+                        // Check if file exists on disk
+                        if (StrUtil.isBlank(fileRecord.localPath()) || !FileUtil.exist(fileRecord.localPath())) {
+                            // File marked as completed but doesn't exist
+                            // Preserve "completed" status for files that were downloaded in the past
+                            // (user may have moved/deleted the file, but we want to preserve the "Downloaded" status)
+                            Long completionDate = fileRecord.completionDate();
+                            if (completionDate == null || completionDate == 0) {
+                                // File doesn't have completionDate - set one based on file date or use a reasonable default
+                                // Use the file's date (when it was sent) as a proxy for when it was downloaded
+                                // This ensures older downloads without completionDate still show as "Downloaded"
+                                if (fileRecord.date() > 0) {
+                                    // Use file date converted to milliseconds (file.date is in seconds)
+                                    completionDate = fileRecord.date() * 1000L;
+                                } else {
+                                    // Fallback: use a timestamp from the past (e.g., 1 year ago)
+                                    // This ensures it shows as "Downloaded" (before current session)
+                                    completionDate = System.currentTimeMillis() - (365L * 24 * 60 * 60 * 1000);
+                                }
+                                // Update the record to set completionDate so it persists
+                                DataVerticle.fileRepository.updateDownloadStatus(
+                                        fileRecord.id(),
+                                        fileRecord.uniqueId(),
+                                        fileRecord.localPath(), // Keep existing path even though file is gone
+                                        FileRecord.DownloadStatus.completed,
+                                        completionDate
+                                ).onSuccess(r -> {
+                                    log.debug("[%s] Set completionDate for deleted file (preserving 'Downloaded' status): %s"
+                                            .formatted(getRootId(), fileRecord.uniqueId()));
+                                    synced.incrementAndGet();
+                                    checkSyncComplete(processed.incrementAndGet(), completedFiles.size(), synced.get(), notFound.get());
+                                })
+                                .onFailure(e -> {
+                                    log.debug("[%s] Failed to set completionDate for deleted file: %s"
+                                            .formatted(getRootId(), e.getMessage()));
+                                    synced.incrementAndGet();
+                                    checkSyncComplete(processed.incrementAndGet(), completedFiles.size(), synced.get(), notFound.get());
+                                });
+                            } else {
+                                // File already has completionDate - keep status as completed
+                                log.debug("[%s] File was downloaded in the past but not found on disk (likely moved/deleted) - keeping as completed: %s"
+                                        .formatted(getRootId(), fileRecord.uniqueId()));
+                                synced.incrementAndGet();
+                                checkSyncComplete(processed.incrementAndGet(), completedFiles.size(), synced.get(), notFound.get());
+                            }
+                            continue;
+                        }
+                        
+                        // File exists - verify with Telegram client
+                        // Query the file to sync its status
+                        client.execute(new TdApi.GetFile(fileRecord.id()))
+                                .onSuccess(file -> {
+                                    if (file != null && file.local != null && file.local.isDownloadingCompleted) {
+                                        // File is actually completed - sync status
+                                        syncFileDownloadStatus(file, null, null)
+                                                .onSuccess(r -> {
+                                                    synced.incrementAndGet();
+                                                    checkSyncComplete(processed.incrementAndGet(), completedFiles.size(), synced.get(), notFound.get());
+                                                })
+                                                .onFailure(e -> {
+                                                    log.debug("[%s] Failed to sync file status: %s"
+                                                            .formatted(getRootId(), fileRecord.uniqueId()));
+                                                    checkSyncComplete(processed.incrementAndGet(), completedFiles.size(), synced.get(), notFound.get());
+                                                });
+                                    } else {
+                                        // File not completed in Telegram cache, but exists on disk
+                                        // Keep it as completed since the file is actually there
+                                        log.debug("[%s] File exists on disk but not in Telegram cache - keeping as completed: %s"
+                                                .formatted(getRootId(), fileRecord.uniqueId()));
+                                        // Ensure completionDate is set if missing
+                                        Long completionDate = fileRecord.completionDate();
+                                        if (completionDate == null || completionDate == 0) {
+                                            // Set completionDate to file modification time or current time
+                                            try {
+                                                Path filePath = Path.of(fileRecord.localPath());
+                                                if (Files.exists(filePath)) {
+                                                    completionDate = Files.getLastModifiedTime(filePath).toMillis();
+                                                } else {
+                                                    completionDate = System.currentTimeMillis();
+                                                }
+                                                DataVerticle.fileRepository.updateDownloadStatus(
+                                                    fileRecord.id(),
+                                                    fileRecord.uniqueId(),
+                                                    fileRecord.localPath(),
+                                                    FileRecord.DownloadStatus.completed,
+                                                    completionDate
+                                                );
+                                            } catch (Exception ex) {
+                                                log.debug("[%s] Failed to set completionDate: %s"
+                                                        .formatted(getRootId(), ex.getMessage()));
+                                            }
+                                        }
+                                        synced.incrementAndGet();
+                                        checkSyncComplete(processed.incrementAndGet(), completedFiles.size(), synced.get(), notFound.get());
+                                    }
+                                })
+                                .onFailure(e -> {
+                                    // File might not be accessible from Telegram, but exists on disk
+                                    // Keep it as completed since the file is actually there
+                                    log.debug("[%s] Could not query file from Telegram (file exists on disk) - keeping as completed: %s"
+                                            .formatted(getRootId(), fileRecord.uniqueId()));
+                                    // Ensure completionDate is set if missing
+                                    Long completionDate = fileRecord.completionDate();
+                                    if (completionDate == null || completionDate == 0) {
+                                        try {
+                                            Path filePath = Path.of(fileRecord.localPath());
+                                            if (Files.exists(filePath)) {
+                                                completionDate = Files.getLastModifiedTime(filePath).toMillis();
+                                            } else {
+                                                completionDate = System.currentTimeMillis();
+                                            }
+                                            DataVerticle.fileRepository.updateDownloadStatus(
+                                                fileRecord.id(),
+                                                fileRecord.uniqueId(),
+                                                fileRecord.localPath(),
+                                                FileRecord.DownloadStatus.completed,
+                                                completionDate
+                                            );
+                                        } catch (Exception ex) {
+                                            log.debug("[%s] Failed to set completionDate: %s"
+                                                    .formatted(getRootId(), ex.getMessage()));
+                                        }
+                                    }
+                                    synced.incrementAndGet();
+                                    checkSyncComplete(processed.incrementAndGet(), completedFiles.size(), synced.get(), notFound.get());
+                                });
+                    }
+                })
+                .onFailure(e -> log.error("[%s] Failed to sync completed files status: %s"
+                        .formatted(getRootId(), e.getMessage())));
+    }
+    
+    private void checkSyncComplete(int processed, int total, int synced, int notFound) {
+        if (processed >= total) {
+            log.info("[%s] Completed files sync finished. Synced: %d, Not found: %d"
+                    .formatted(getRootId(), synced, notFound));
+        }
     }
 }
