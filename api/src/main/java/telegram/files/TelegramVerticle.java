@@ -33,6 +33,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
+import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 public class TelegramVerticle extends AbstractVerticle {
@@ -173,7 +175,11 @@ public class TelegramVerticle extends AbstractVerticle {
     }
 
     public Future<JsonArray> getChats(Long activatedChatId, String query, boolean archived) {
-        return TelegramConverter.convertChat(this.telegramRecord.id(), telegramChats.getChatList(activatedChatId, query, 100, archived));
+        Set<Long> enabledChatIds = AutomationsHolder.INSTANCE.autoRecords().getDownloadEnabledItems().stream()
+                .filter(item -> item.telegramId == this.telegramRecord.id())
+                .map(item -> item.chatId)
+                .collect(Collectors.toSet());
+        return TelegramConverter.convertChat(this.telegramRecord.id(), telegramChats.getChatList(activatedChatId, query, 100, archived, enabledChatIds));
     }
 
     public TdApi.Chat getChat(long chatId) {
@@ -254,6 +260,10 @@ public class TelegramVerticle extends AbstractVerticle {
             counts.<JsonObject>list().forEach(count -> result.put(count.getString("type"), count.getInteger("count")));
             return result;
         });
+    }
+
+    public Future<JsonObject> getChatDownloadStatistics(long chatId) {
+        return DataVerticle.fileRepository.getChatDownloadStatistics(this.telegramRecord.id(), chatId);
     }
 
     public Future<JsonObject> parseLink(String link) {

@@ -163,6 +163,7 @@ public class HttpVerticle extends AbstractVerticle {
         router.get("/telegram/:telegramId/chats").handler(this::handleTelegramChats);
         router.get("/telegram/:telegramId/chat/:chatId/files").handler(this::handleTelegramFiles);
         router.get("/telegram/:telegramId/chat/:chatId/files/count").handler(this::handleTelegramFilesCount);
+        router.get("/telegram/:telegramId/chat/:chatId/statistics").handler(this::handleTelegramChatDownloadStatistics);
         router.get("/telegram/:telegramId/download-statistics").handler(this::handleTelegramDownloadStatistics);
         router.post("/telegrams/change").handler(this::handleTelegramChange);
         router.post("/telegram/:telegramId/toggle-proxy").handler(this::handleTelegramToggleProxy);
@@ -464,6 +465,22 @@ public class HttpVerticle extends AbstractVerticle {
         String timeRange = ctx.request().getParam("timeRange");
         (Objects.equals(type, "phase") ? telegramVerticle.getDownloadStatisticsByPhase(Convert.toInt(timeRange, 1)) :
                 telegramVerticle.getDownloadStatistics())
+                .onSuccess(ctx::json)
+                .onFailure(ctx::fail);
+    }
+
+    private void handleTelegramChatDownloadStatistics(RoutingContext ctx) {
+        TelegramVerticle telegramVerticle = getTelegramVerticleByPath(ctx);
+        if (telegramVerticle == null) {
+            return;
+        }
+        String chatId = ctx.pathParam("chatId");
+        if (StrUtil.isBlank(chatId)) {
+            ctx.fail(400);
+            return;
+        }
+
+        telegramVerticle.getChatDownloadStatistics(Convert.toLong(chatId))
                 .onSuccess(ctx::json)
                 .onFailure(ctx::fail);
     }

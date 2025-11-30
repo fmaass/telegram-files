@@ -29,6 +29,8 @@ public interface FileRepository {
 
     Future<JsonObject> getDownloadStatistics(long telegramId);
 
+    Future<JsonObject> getChatDownloadStatistics(long telegramId, long chatId);
+
     Future<JsonObject> getDownloadStatistics();
 
     Future<JsonArray> getCompletedRangeStatistics(long id, long startTime, long endTime, int timeRange);
