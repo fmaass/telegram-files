@@ -309,8 +309,7 @@ public class AutoDownloadVerticle extends AbstractVerticle {
             int nextTypeIndex = fileTypes.indexOf(nextFileType) + 1;
             if (nextTypeIndex < fileTypes.size()) {
                 params.nextFileType = fileTypes.get(nextTypeIndex);
-                // Reset to appropriate starting position based on download order
-                boolean downloadOldestFirst = params.rule != null && params.rule.downloadOldestFirst;
+                // Reset to appropriate starting position based on download order (reuse variable from line 286)
                 params.nextFromMessageId = downloadOldestFirst ? 1 : 0;
                 log.debug("%s No more %s files found! Switch to %s".formatted(uniqueKey, nextFileType, params.nextFileType));
                 addHistoryMessage(params, callback, currentTimeMillis);
