@@ -34,6 +34,7 @@ const DEFAULT_AUTO: Auto = {
       downloadHistory: true,
       downloadCommentFiles: false,
       filterExpr: "",
+      downloadOldestFirst: false,
     },
   },
   transfer: {
