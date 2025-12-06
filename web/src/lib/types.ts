@@ -205,4 +205,9 @@ export type AutoDownloadRule = {
    * If null/undefined, all history is considered (when downloadHistory is true).
    */
   historySince?: string | null;
+  /**
+   * If true, download files from oldest to newest.
+   * If false (default), download from newest to oldest.
+   */
+  downloadOldestFirst?: boolean;
 };

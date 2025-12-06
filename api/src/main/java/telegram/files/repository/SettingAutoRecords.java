@@ -95,6 +95,9 @@ public class SettingAutoRecords {
 
         /** UTC seconds since epoch. If present, only backfill messages on/after this. */
         public Integer historySince;
+
+        /** If true, download from oldest to newest. If false (default), download from newest to oldest. */
+        public boolean downloadOldestFirst;
     }
 
     public static class TransferConfig {

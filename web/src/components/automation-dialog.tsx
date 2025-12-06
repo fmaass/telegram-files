@@ -33,6 +33,7 @@ const DEFAULT_AUTO: Auto = {
       fileTypes: [],
       downloadHistory: true,
       downloadCommentFiles: false,
+      downloadOldestFirst: false,
     },
   },
   transfer: {

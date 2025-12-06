@@ -281,7 +281,19 @@ public class AutoDownloadVerticle extends AbstractVerticle {
         TdApi.SearchChatMessages searchChatMessages = new TdApi.SearchChatMessages();
         searchChatMessages.query = rule.v1;
         searchChatMessages.chatId = chatId;
-        searchChatMessages.fromMessageId = nextFromMessageId;
+        
+        // Handle reverse order (oldest to newest)
+        boolean downloadOldestFirst = params.rule != null && params.rule.downloadOldestFirst;
+        if (downloadOldestFirst) {
+            // For oldest-to-newest: start from message ID 1 if beginning, use negative offset to scan forward
+            searchChatMessages.fromMessageId = nextFromMessageId == 0 ? 1 : nextFromMessageId;
+            searchChatMessages.offset = -50;  // Negative offset scans forward (toward newer messages)
+        } else {
+            // For newest-to-oldest (default): start from 0 (newest), scan backward
+            searchChatMessages.fromMessageId = nextFromMessageId;
+            searchChatMessages.offset = 0;  // Default behavior
+        }
+        
         searchChatMessages.limit = Math.min(MAX_WAITING_LENGTH, 100);
         searchChatMessages.filter = TdApiHelp.getSearchMessagesFilter(nextFileType);
         searchChatMessages.messageThreadId = params.messageThreadId;
@@ -297,7 +309,9 @@ public class AutoDownloadVerticle extends AbstractVerticle {
             int nextTypeIndex = fileTypes.indexOf(nextFileType) + 1;
             if (nextTypeIndex < fileTypes.size()) {
                 params.nextFileType = fileTypes.get(nextTypeIndex);
-                params.nextFromMessageId = 0;
+                // Reset to appropriate starting position based on download order
+                boolean downloadOldestFirst = params.rule != null && params.rule.downloadOldestFirst;
+                params.nextFromMessageId = downloadOldestFirst ? 1 : 0;
                 log.debug("%s No more %s files found! Switch to %s".formatted(uniqueKey, nextFileType, params.nextFileType));
                 addHistoryMessage(params, callback, currentTimeMillis);
             } else {

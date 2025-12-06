@@ -316,6 +316,25 @@ function DownloadRule({ value, onChange }: DownloadRuleProps) {
               <p className="mt-1 text-xs text-muted-foreground">
                 Time is automatically set to 00:01 AM on the selected date.
               </p>
+
+              {/* Download oldest first toggle */}
+              <div className="mt-3 flex items-center justify-between">
+                <Label htmlFor="download-oldest-first">Download oldest first</Label>
+                <Switch
+                  id="download-oldest-first"
+                  checked={value.downloadOldestFirst ?? false}
+                  onCheckedChange={(checked) =>
+                    onChange({
+                      ...value,
+                      downloadOldestFirst: checked,
+                    })
+                  }
+                  disabled={!value.downloadHistory}
+                />
+              </div>
+              <p className="mt-1 text-xs text-muted-foreground">
+                If enabled, files will be downloaded from oldest to newest. Otherwise, files will be downloaded from newest to oldest (default).
+              </p>
             </div>
             <div className="rounded-md border p-4">
               <div className="flex items-center justify-between">
