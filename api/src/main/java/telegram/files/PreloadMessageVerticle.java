@@ -7,6 +7,7 @@ import io.vertx.core.Future;
 import io.vertx.core.Promise;
 import io.vertx.core.json.JsonObject;
 import org.drinkless.tdlib.TdApi;
+import telegram.files.repository.AutomationState;
 import telegram.files.repository.FileRecord;
 import telegram.files.repository.SettingAutoRecords;
 
@@ -33,7 +34,7 @@ public class PreloadMessageVerticle extends AbstractVerticle {
                     vertx.setPeriodic(0, HISTORY_SCAN_INTERVAL,
                             _ -> autoRecords.getPreloadEnabledItems()
                                     .stream()
-                                    .filter(auto -> auto.isNotComplete(SettingAutoRecords.HISTORY_PRELOAD_STATE))
+                                    .filter(auto -> auto.isNotComplete(AutomationState.HISTORY_PRELOAD_COMPLETE))
                                     .forEach(auto -> addHistoryMessage(auto, System.currentTimeMillis())));
 
                     log.info("""
@@ -90,7 +91,7 @@ public class PreloadMessageVerticle extends AbstractVerticle {
         );
         if (foundChatMessages == null || foundChatMessages.messages.length == 0) {
             log.debug("%s No more history message found! TelegramId: %d ChatId: %d".formatted(auto.uniqueKey(), auto.telegramId, auto.chatId));
-            auto.complete(SettingAutoRecords.HISTORY_PRELOAD_STATE);
+            auto.complete(AutomationState.HISTORY_PRELOAD_COMPLETE);
             return;
         }
         int count = 0;

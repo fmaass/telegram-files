@@ -297,7 +297,10 @@ public class TdApiHelp {
                     null,
                     0L,
                     0L,
-                    0L
+                    0L,
+                    "idle", // scanState
+                    0,      // downloadPriority
+                    null    // queuedAt
             );
         }
     }
@@ -347,7 +350,10 @@ public class TdApiHelp {
                     null,
                     0L,
                     0L,
-                    getReactionCount()
+                    getReactionCount(),
+                    "idle", // scanState
+                    0,      // downloadPriority
+                    null    // queuedAt
             );
         }
 
@@ -410,7 +416,10 @@ public class TdApiHelp {
                     null,
                     0L,
                     0L,
-                    getReactionCount()
+                    getReactionCount(),
+                    "idle", // scanState
+                    0,      // downloadPriority
+                    null    // queuedAt
             );
         }
 
@@ -479,7 +488,10 @@ public class TdApiHelp {
                     null,
                     0L,
                     0L,
-                    getReactionCount()
+                    getReactionCount(),
+                    "idle", // scanState
+                    0,      // downloadPriority
+                    null    // queuedAt
             );
         }
 
@@ -543,7 +555,10 @@ public class TdApiHelp {
                     null,
                     0L,
                     0L,
-                    getReactionCount()
+                    getReactionCount(),
+                    "idle", // scanState
+                    0,      // downloadPriority
+                    null    // queuedAt
             );
         }
 
