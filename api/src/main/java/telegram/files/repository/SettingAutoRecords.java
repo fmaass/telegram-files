@@ -5,20 +5,38 @@ import telegram.files.MessyUtils;
 import telegram.files.Transfer;
 
 import java.util.ArrayList;
+import java.util.EnumSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.function.Function;
 import java.util.stream.Collectors;
 
 public class SettingAutoRecords {
     public List<Automation> automations;
 
+    /**
+     * @deprecated Use AutomationState enum instead.
+     */
+    @Deprecated
     public static final int HISTORY_PRELOAD_STATE = 1;
 
+    /**
+     * @deprecated Use AutomationState enum instead.
+     */
+    @Deprecated
     public static final int HISTORY_DOWNLOAD_STATE = 2;
 
+    /**
+     * @deprecated Use AutomationState enum instead.
+     */
+    @Deprecated
     public static final int HISTORY_DOWNLOAD_SCAN_STATE = 3;
 
+    /**
+     * @deprecated Use AutomationState enum instead.
+     */
+    @Deprecated
     public static final int HISTORY_TRANSFER_STATE = 4;
 
     public static class Automation {
@@ -32,12 +50,64 @@ public class SettingAutoRecords {
 
         public TransferConfig transfer;
 
+        /**
+         * Legacy bitwise state field.
+         * Kept for backward compatibility but should be migrated to use getStates()/setStates().
+         */
         public int state;
+        
+        /**
+         * Get automation states as enum set.
+         * Converts from legacy bitwise state if needed.
+         */
+        @JsonIgnore
+        public Set<AutomationState> getStates() {
+            return AutomationState.fromLegacyState(state);
+        }
+        
+        /**
+         * Set automation states from enum set.
+         * Updates legacy bitwise state for backward compatibility.
+         */
+        @JsonIgnore
+        public void setStates(Set<AutomationState> states) {
+            this.state = AutomationState.toLegacyState(states);
+        }
+        
+        /**
+         * Mark a state as complete.
+         */
+        @JsonIgnore
+        public void complete(AutomationState automationState) {
+            Set<AutomationState> states = getStates();
+            states.add(automationState);
+            setStates(states);
+        }
+        
+        /**
+         * Check if a state is complete.
+         */
+        @JsonIgnore
+        public boolean isComplete(AutomationState automationState) {
+            return getStates().contains(automationState);
+        }
+        
+        /**
+         * Check if a state is not complete.
+         */
+        @JsonIgnore
+        public boolean isNotComplete(AutomationState automationState) {
+            return !isComplete(automationState);
+        }
 
         public String uniqueKey() {
             return telegramId + ":" + chatId;
         }
 
+        /**
+         * @deprecated Use complete(AutomationState) instead.
+         */
+        @Deprecated
         @JsonIgnore
         public void complete(int bitwise) {
             MessyUtils.BitState bitState = new MessyUtils.BitState(state);
@@ -45,12 +115,20 @@ public class SettingAutoRecords {
             state = bitState.getState();
         }
 
+        /**
+         * @deprecated Use isComplete(AutomationState) instead.
+         */
+        @Deprecated
         @JsonIgnore
         public boolean isComplete(int bitwise) {
             MessyUtils.BitState bitState = new MessyUtils.BitState(state);
             return bitState.isStateEnabled(bitwise);
         }
 
+        /**
+         * @deprecated Use isNotComplete(AutomationState) instead.
+         */
+        @Deprecated
         @JsonIgnore
         public boolean isNotComplete(int bitwise) {
             return !isComplete(bitwise);

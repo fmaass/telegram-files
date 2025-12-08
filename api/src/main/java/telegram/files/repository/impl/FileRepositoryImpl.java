@@ -18,9 +18,15 @@ import io.vertx.sqlclient.templates.SqlTemplate;
 import org.jooq.lambda.tuple.Tuple;
 import org.jooq.lambda.tuple.Tuple3;
 import telegram.files.Config;
+import telegram.files.DataVerticle;
 import telegram.files.MessyUtils;
+import telegram.files.TelegramVerticle;
+import telegram.files.TelegramVerticles;
 import telegram.files.repository.FileRecord;
 import telegram.files.repository.FileRepository;
+import telegram.files.repository.SettingAutoRecords;
+import telegram.files.repository.SettingKey;
+import org.drinkless.tdlib.TdApi;
 
 import java.time.LocalDate;
 import java.time.LocalTime;
@@ -796,5 +802,144 @@ public class FileRepositoryImpl extends AbstractSqlRepository implements FileRep
                 .execute(Map.of("telegramId", telegramId, "chatId", chatId))
                 .map(rs -> rs.size() > 0 ? rs.iterator().next() : 0L)
                 .onFailure(err -> log.error("Failed to get min message ID: %s".formatted(err.getMessage())));
+    }
+    
+    @Override
+    public Future<List<FileRecord>> getFilesReadyForDownload(long telegramId, int limit, Integer cutoffDateSeconds, Boolean downloadOldestFirst) {
+        // Get automation settings to determine cutoff and ordering if not provided
+        return DataVerticle.settingRepository.<SettingAutoRecords>getByKey(SettingKey.automation)
+            .compose(autoRecords -> {
+                // Determine downloadOldestFirst from automation settings if not provided
+                Boolean resolvedDownloadOldestFirst = downloadOldestFirst;
+                if (resolvedDownloadOldestFirst == null && autoRecords != null && autoRecords.automations != null) {
+                    for (SettingAutoRecords.Automation auto : autoRecords.automations) {
+                        if (auto.telegramId == telegramId 
+                            && auto.download != null 
+                            && auto.download.rule != null) {
+                            resolvedDownloadOldestFirst = auto.download.rule.downloadOldestFirst;
+                            break;
+                        }
+                    }
+                }
+                final Boolean finalDownloadOldestFirst = resolvedDownloadOldestFirst;
+                
+                // Determine cutoff date from automation settings if not provided
+                if (cutoffDateSeconds == null && autoRecords != null && autoRecords.automations != null) {
+                    for (SettingAutoRecords.Automation auto : autoRecords.automations) {
+                        if (auto.telegramId == telegramId 
+                            && auto.download != null 
+                            && auto.download.rule != null 
+                            && auto.download.rule.historySince != null 
+                            && auto.download.rule.historySince > 0) {
+                            // Get sentinel message date
+                            Optional<TelegramVerticle> verticleOpt = TelegramVerticles.get(telegramId);
+                            if (verticleOpt.isPresent()) {
+                                return verticleOpt.get().client.execute(
+                                    new TdApi.GetChatMessageByDate(auto.chatId, auto.download.rule.historySince)
+                                ).compose(sentinelMessage -> {
+                                    Integer resolvedCutoff = sentinelMessage != null ? sentinelMessage.date : null;
+                                    return queryFilesReadyForDownload(telegramId, limit, resolvedCutoff, finalDownloadOldestFirst);
+                                });
+                            }
+                        }
+                    }
+                }
+                
+                return queryFilesReadyForDownload(telegramId, limit, cutoffDateSeconds, finalDownloadOldestFirst);
+            });
+    }
+    
+    private Future<List<FileRecord>> queryFilesReadyForDownload(long telegramId, int limit, Integer cutoffDateSeconds, Boolean downloadOldestFirst) {
+        Map<String, Object> params = new HashMap<>();
+        params.put("telegramId", telegramId);
+        params.put("limit", limit);
+        
+        StringBuilder queryBuilder = new StringBuilder("""
+            SELECT * FROM file_record
+            WHERE telegram_id = #{telegramId}
+              AND download_status = 'idle'
+              AND (scan_state = 'idle' OR scan_state IS NULL)
+              AND type != 'thumbnail'
+            """);
+        
+        if (cutoffDateSeconds != null && cutoffDateSeconds > 0) {
+            queryBuilder.append("  AND date >= #{cutoffDateSeconds}\n");
+            params.put("cutoffDateSeconds", cutoffDateSeconds);
+        }
+        
+        // Order by: date (Telegram upload date) first for chronological ordering, then queued_at
+        // When downloadOldestFirst is true, prioritize oldest files by date, regardless of when they were queued
+        // message_id is not reliable for chronological ordering, use date instead
+        if (Boolean.TRUE.equals(downloadOldestFirst)) {
+            queryBuilder.append("  ORDER BY date ASC, COALESCE(queued_at, ").append(Long.MAX_VALUE).append(") ASC, message_id ASC\n");
+        } else {
+            queryBuilder.append("  ORDER BY date DESC, COALESCE(queued_at, ").append(Long.MAX_VALUE).append(") ASC, message_id DESC\n");
+        }
+        
+        queryBuilder.append("  LIMIT #{limit}\n");
+        
+        return SqlTemplate
+            .forQuery(sqlClient, queryBuilder.toString())
+            .mapTo(FileRecord.ROW_MAPPER)
+            .execute(params)
+            .onFailure(err -> log.error("Failed to get files ready for download: %s".formatted(err.getMessage())))
+            .map(IterUtil::toList);
+    }
+    
+    @Override
+    public Future<Integer> queueFilesForDownload(long telegramId, long chatId, int limit, Integer cutoffDateSeconds, Boolean downloadOldestFirst) {
+        Map<String, Object> params = new HashMap<>();
+        params.put("telegramId", telegramId);
+        params.put("limit", limit);
+        params.put("queuedAt", System.currentTimeMillis());
+        
+        StringBuilder queryBuilder = new StringBuilder("""
+            WITH files_to_queue AS (
+                SELECT id FROM file_record
+                WHERE telegram_id = #{telegramId}
+                  AND download_status = 'idle'
+                  AND (scan_state = 'idle' OR scan_state IS NULL)
+                  AND type != 'thumbnail'
+                  AND queued_at IS NULL
+            """);
+        
+        if (chatId != 0) {
+            queryBuilder.append("  AND chat_id = #{chatId}\n");
+            params.put("chatId", chatId);
+        }
+        
+        if (cutoffDateSeconds != null && cutoffDateSeconds > 0) {
+            queryBuilder.append("  AND date >= #{cutoffDateSeconds}\n");
+            params.put("cutoffDateSeconds", cutoffDateSeconds);
+        }
+        
+        // Order by date (Telegram upload date) for correct chronological ordering
+        // message_id is not reliable for chronological ordering
+        if (Boolean.TRUE.equals(downloadOldestFirst)) {
+            queryBuilder.append("  ORDER BY date ASC, message_id ASC\n");
+        } else {
+            queryBuilder.append("  ORDER BY date DESC, message_id DESC\n");
+        }
+        
+        queryBuilder.append("""
+                LIMIT #{limit}
+            )
+            UPDATE file_record
+            SET queued_at = #{queuedAt}
+            WHERE id IN (SELECT id FROM files_to_queue)
+            """);
+        
+        String finalQuery = queryBuilder.toString();
+        log.debug("Queueing files with query: %s".formatted(finalQuery.replaceAll("#\\{[^}]+\\}", "?")));
+        return SqlTemplate
+            .forUpdate(sqlClient, finalQuery)
+            .execute(params)
+            .onSuccess(count -> {
+                if (count.rowCount() > 0) {
+                    log.info("Successfully queued %d files for download. TelegramId: %d, ChatId: %d".formatted(count.rowCount(), telegramId, chatId));
+                }
+            })
+            .onFailure(err -> log.error("Failed to queue files for download: %s".formatted(err.getMessage())))
+            .map(SqlResult::rowCount);
     }
 }

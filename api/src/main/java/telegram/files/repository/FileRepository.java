@@ -58,4 +58,26 @@ public interface FileRepository {
     Future<Void> deleteByUniqueId(String uniqueId);
 
     Future<Long> getMinMessageId(long telegramId, long chatId);
+    
+    /**
+     * Get files ready for download from database.
+     * Queries files with download_status='idle' and scan_state='idle'.
+     * Orders by download_priority DESC, queued_at ASC.
+     * 
+     * @param telegramId Telegram account ID
+     * @param limit Maximum number of files to return
+     * @return List of FileRecord ready for download
+     */
+    Future<List<FileRecord>> getFilesReadyForDownload(long telegramId, int limit, Integer cutoffDateSeconds, Boolean downloadOldestFirst);
+    
+    /**
+     * Mark files as queued by setting queued_at timestamp.
+     * Updates files with download_status='idle' and scan_state='idle' (or NULL).
+     * 
+     * @param telegramId Telegram account ID
+     * @param chatId Chat ID (0 for all chats)
+     * @param limit Maximum number of files to queue
+     * @return Number of files queued
+     */
+    Future<Integer> queueFilesForDownload(long telegramId, long chatId, int limit, Integer cutoffDateSeconds, Boolean downloadOldestFirst);
 }

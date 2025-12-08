@@ -9,6 +9,7 @@ import io.vertx.core.Future;
 import io.vertx.core.Promise;
 import io.vertx.core.json.JsonObject;
 import org.jooq.lambda.tuple.Tuple3;
+import telegram.files.repository.AutomationState;
 import telegram.files.repository.FileRecord;
 import telegram.files.repository.SettingAutoRecords;
 
@@ -129,7 +130,7 @@ public class TransferVerticle extends AbstractVerticle {
         for (SettingAutoRecords.Automation automation : autoRecords.automations) {
             if (!automation.transfer.enabled
                 || !automation.transfer.rule.transferHistory
-                || automation.isComplete(SettingAutoRecords.HISTORY_TRANSFER_STATE)) {
+                || automation.isComplete(AutomationState.HISTORY_TRANSFER_COMPLETE)) {
                 continue;
             }
             Transfer transfer = getTransfer(automation);
@@ -144,7 +145,7 @@ public class TransferVerticle extends AbstractVerticle {
             List<FileRecord> files = filesTuple.v1;
             if (CollUtil.isEmpty(files)) {
                 log.debug("No history files found for transfer: %s".formatted(automation.uniqueKey()));
-                automation.complete(SettingAutoRecords.HISTORY_TRANSFER_STATE);
+                automation.complete(AutomationState.HISTORY_TRANSFER_COMPLETE);
                 continue;
             }
 
