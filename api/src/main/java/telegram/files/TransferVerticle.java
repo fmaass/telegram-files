@@ -138,7 +138,7 @@ public class TransferVerticle extends AbstractVerticle {
                 continue;
             }
             Tuple3<List<FileRecord>, Long, Long> filesTuple = Future.await(DataVerticle.fileRepository.getFiles(automation.chatId,
-                    Map.of("status", FileRecord.DownloadStatus.completed.name(),
+                    Map.of("downloadStatus", FileRecord.DownloadStatus.completed.name(),
                             "transferStatus", FileRecord.TransferStatus.idle.name()
                     )
             ));
@@ -238,6 +238,11 @@ public class TransferVerticle extends AbstractVerticle {
 
     public void startTransfer(FileRecord fileRecord, Transfer transfer) {
         if (isStopped) {
+            return;
+        }
+        if (!fileRecord.isDownloadStatus(FileRecord.DownloadStatus.completed)
+            || StrUtil.isBlank(fileRecord.localPath())) {
+            log.warn("File {} is not downloaded yet", fileRecord.id());
             return;
         }
         if (fileRecord.transferStatus() != null

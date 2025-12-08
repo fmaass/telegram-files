@@ -309,8 +309,18 @@ public class TelegramVerticle extends AbstractVerticle {
                 )
                 .compose(results -> {
                     TdApi.File file = results.resultAt(0);
-                    TdApi.Message message = results.resultAt(1);
-                    TdApi.MessageThreadInfo messageThreadInfo = results.resultAt(2);
+                    return DataVerticle.fileRepository.getByUniqueId(file.remote.uniqueId)
+                            .map(fileRecord -> Tuple.tuple(file,
+                                    results.<TdApi.Message>resultAt(1),
+                                    results.<TdApi.MessageThreadInfo>resultAt(2),
+                                    fileRecord
+                            ));
+                })
+                .compose(results -> {
+                    TdApi.File file = results.v1;
+                    TdApi.Message message = results.v2;
+                    TdApi.MessageThreadInfo messageThreadInfo = results.v3;
+                    FileRecord dbFileRecord = results.v4;
                     if (file.local != null) {
                         if (file.local.isDownloadingCompleted) {
                             return syncFileDownloadStatus(file, message, messageThreadInfo)
@@ -320,6 +330,9 @@ public class TelegramVerticle extends AbstractVerticle {
                             return Future.failedFuture("File is downloading");
                         }
 //                        return Future.failedFuture("Unknown file download status");
+                    }
+                    if (dbFileRecord != null && !dbFileRecord.isDownloadStatus(FileRecord.DownloadStatus.idle)) {
+                        return Future.failedFuture("File is already downloading or completed");
                     }
 
                     TdApiHelp.FileHandler<? extends TdApi.MessageContent> fileHandler = TdApiHelp.getFileHandler(message)
@@ -695,14 +708,47 @@ public class TelegramVerticle extends AbstractVerticle {
 
     private void sendFileStatusHttpEvent(TdApi.File file, JsonObject fileUpdated) {
         if (fileUpdated == null || fileUpdated.isEmpty()) return;
-        sendEvent(EventPayload.build(EventPayload.TYPE_FILE_STATUS, new JsonObject()
+
+        JsonObject statusData = new JsonObject()
                 .put("fileId", file.id)
                 .put("uniqueId", file.remote.uniqueId)
                 .put("downloadStatus", fileUpdated.getString("downloadStatus"))
                 .put("localPath", fileUpdated.getString("localPath"))
                 .put("completionDate", fileUpdated.getLong("completionDate"))
-                .put("downloadedSize", file.local.downloadedSize)
-        ));
+                .put("downloadedSize", file.local.downloadedSize);
+
+        // 如果文件下载完成，尝试获取并包含缩略图文件信息
+        if ("completed".equals(fileUpdated.getString("downloadStatus"))) {
+            DataVerticle.fileRepository.getByUniqueId(file.remote.uniqueId)
+                    .compose(mainFileRecord -> {
+                        if (mainFileRecord != null && mainFileRecord.thumbnailUniqueId() != null) {
+                            return FileRecordRetriever.getThumbnails(List.of(mainFileRecord))
+                                    .map(thumbnailMap -> {
+                                        FileRecord thumbnailRecord = thumbnailMap.get(mainFileRecord.thumbnailUniqueId());
+                                        if (thumbnailRecord != null && thumbnailRecord.isDownloadStatus(FileRecord.DownloadStatus.completed)) {
+                                            statusData.put("thumbnailFile", JsonObject.of(
+                                                    "uniqueId", thumbnailRecord.uniqueId(),
+                                                    "mimeType", thumbnailRecord.mimeType(),
+                                                    "extra", StrUtil.isBlank(thumbnailRecord.extra()) ? null : Json.decodeValue(thumbnailRecord.extra())
+                                            ));
+                                        }
+                                        return statusData;
+                                    });
+                        }
+                        return Future.succeededFuture(statusData);
+                    })
+                    .onSuccess(finalStatusData -> {
+                        sendEvent(EventPayload.build(EventPayload.TYPE_FILE_STATUS, finalStatusData));
+                    })
+                    .onFailure(err -> {
+                        // 如果获取缩略图失败，仍然发送基本状态信息
+                        log.error("Failed to get thumbnail info for file: %s, error: %s".formatted(file.remote.uniqueId, err.getMessage()));
+                        sendEvent(EventPayload.build(EventPayload.TYPE_FILE_STATUS, statusData));
+                    });
+        } else {
+            // 非完成状态直接发送
+            sendEvent(EventPayload.build(EventPayload.TYPE_FILE_STATUS, statusData));
+        }
     }
 
     private void handleAuthorizationResult(TdApi.Object object) {

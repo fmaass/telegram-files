@@ -450,6 +450,8 @@ export default function FileFilters({
       open={open}
       onOpenChange={setOpen}
       direction={isMobile ? "bottom" : "left"}
+      shouldScaleBackground={isMobile}
+      preventScrollRestoration={true}
     >
       <DrawerTrigger asChild>
         <Button
