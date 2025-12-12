@@ -82,9 +82,9 @@ export default function FilePreview({
   const { settings } = useSettings();
   const showAlbumArtForMovedFiles = settings?.showAlbumArtForMovedFiles === "true";
   
-  // Check if file has been moved (downloadStatus = "processed" or file doesn't exist)
-  const isFileMoved = file.downloadStatus === "processed" || 
-                      (file.downloadStatus === "completed" && !file.localPath);
+  // Check if file has been moved (completed but localPath is missing/empty)
+  // Files are moved by post-processing, so if completed but no localPath, it's been moved
+  const isFileMoved = file.downloadStatus === "completed" && (!file.localPath || file.localPath.trim() === "");
   
   const [viewportHeight, setViewportHeight] = useState(
     isFullPreview ? window.innerHeight : 288,
@@ -174,6 +174,18 @@ export default function FilePreview({
     }
   }
   
+  // 渲染没有图像的文件
+  const renderFileIcon = () => (
+    <div
+      className={cn(
+        "flex h-16 w-16 items-center justify-center rounded bg-muted",
+        className,
+      )}
+    >
+      {getFileIcon(file.type)}
+    </div>
+  );
+
   // If file is moved and album art is disabled, show fallback
   if (isFileMoved && !showAlbumArtForMovedFiles) {
     // Show thumbnail if available, otherwise show icon
@@ -200,18 +212,6 @@ export default function FilePreview({
   if (file.thumbnail) {
     return renderImage(isFullPreview ? 600 : 32, isFullPreview ? 600 : 32, "");
   }
-
-  // 渲染没有图像的文件
-  const renderFileIcon = () => (
-    <div
-      className={cn(
-        "flex h-16 w-16 items-center justify-center rounded bg-muted",
-        className,
-      )}
-    >
-      {getFileIcon(file.type)}
-    </div>
-  );
 
   return renderFileIcon();
 }

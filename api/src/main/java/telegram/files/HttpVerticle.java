@@ -30,6 +30,8 @@ import io.vertx.ext.web.sstore.LocalSessionStore;
 import io.vertx.ext.web.sstore.SessionStore;
 import org.drinkless.tdlib.TdApi;
 import org.jooq.lambda.function.Function2;
+import org.jooq.lambda.tuple.Tuple;
+import org.jooq.lambda.tuple.Tuple2;
 import telegram.files.repository.AutomationControlState;
 import telegram.files.repository.FileRecord;
 import telegram.files.repository.SettingAutoRecords;
@@ -1327,18 +1329,19 @@ public class HttpVerticle extends AbstractVerticle {
         
         // Get file statistics
         DataVerticle.fileRepository.countByStatus(automation.telegramId, FileRecord.DownloadStatus.downloading)
-                .compose(downloadingCount -> {
+                .compose((Integer downloadingCount) -> {
                     return DataVerticle.fileRepository.getFiles(automation.chatId, Map.of(
                             "downloadStatus", "idle",
                             "limit", "1"
                     )).map(idleResult -> {
                         long idleCount = idleResult.v3(); // total count
-                        return Tuple2.of(downloadingCount != null ? downloadingCount : 0, idleCount);
+                        return Tuple.tuple(downloadingCount != null ? downloadingCount : 0, idleCount);
                     });
                 })
                 .onSuccess(result -> {
-                    int downloading = result.v1();
-                    long pending = result.v2();
+                    Tuple2<Integer, Long> tuple = (Tuple2<Integer, Long>) result;
+                    int downloading = tuple.v1();
+                    long pending = tuple.v2();
                     
                     JsonObject response = new JsonObject()
                             .put("chatId", automation.chatId)
