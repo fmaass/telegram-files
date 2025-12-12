@@ -30,6 +30,7 @@ export type DownloadStatus =
   | "downloading"
   | "paused"
   | "completed"
+  | "processed"
   | "error";
 
 export type TransferStatus = "idle" | "transferring" | "completed" | "error";

@@ -82,9 +82,13 @@ export default function FilePreview({
   const { settings } = useSettings();
   const showAlbumArtForMovedFiles = settings?.showAlbumArtForMovedFiles === "true";
   
-  // Check if file has been moved (completed but localPath is missing/empty)
-  // Files are moved by post-processing, so if completed but no localPath, it's been moved
-  const isFileMoved = file.downloadStatus === "completed" && (!file.localPath || file.localPath.trim() === "");
+  // Check if file has been moved
+  // Files are ALWAYS moved by post-processing, so:
+  // - If status is "processed", file was definitely moved
+  // - If status is "completed" but no localPath, file was moved
+  // - Even if localPath exists, file might have been moved (path points to old location)
+  const isFileMoved = file.downloadStatus === "processed" || 
+                      (file.downloadStatus === "completed" && (!file.localPath || file.localPath.trim() === ""));
   
   const [viewportHeight, setViewportHeight] = useState(
     isFullPreview ? window.innerHeight : 288,
@@ -103,14 +107,13 @@ export default function FilePreview({
   }, [isFullPreview]);
 
   const handleError = (error?: Error | React.SyntheticEvent<HTMLImageElement, Event>) => {
-    // Silently handle errors for moved files (expected condition)
-    if (isFileMoved) {
-      setError(true);
-      return;
-    }
-    // Log other errors for debugging
-    console.warn('Failed to load file preview:', file.uniqueId, error);
+    // Always handle image load errors gracefully (files might be moved or missing)
+    // This prevents crashes when files don't exist
     setError(true);
+    // Only log if it's not a moved file (to reduce noise)
+    if (!isFileMoved) {
+      console.warn('Failed to load file preview:', file.uniqueId, error);
+    }
   };
 
   if (error) {
@@ -125,6 +128,11 @@ export default function FilePreview({
   // 确定图像源
   const getImageSource = (uniqueId: string) => {
     if (uniqueId) {
+      // Don't request if file is moved and setting is disabled
+      if (isFileMoved && !showAlbumArtForMovedFiles) {
+        // Return empty or thumbnail to prevent request
+        return file.thumbnail ? `data:image/jpeg;base64,${file.thumbnail}` : "";
+      }
       return `${getApiUrl()}/${file.telegramId}/file/${uniqueId}`;
     }
     return `data:image/jpeg;base64,${file.thumbnail}`;
