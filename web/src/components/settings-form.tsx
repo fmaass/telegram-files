@@ -136,6 +136,29 @@ export default function SettingsForm() {
           )}
         </div>
         <div className="flex w-full flex-col space-y-4 rounded-md border p-4 shadow">
+          <div
+            className="flex cursor-pointer flex-col space-y-4"
+            onClick={(event) => handleSwitchChange("showAlbumArtForMovedFiles", event)}
+          >
+            <div className="flex items-center justify-between">
+              <Label>Show Album Art for Moved Files</Label>
+              <Switch
+                id="show-album-art-moved"
+                checked={settings?.showAlbumArtForMovedFiles === "true"}
+                onCheckedChange={() => handleSwitchChange("showAlbumArtForMovedFiles")}
+              />
+            </div>
+            <p className="text-xs text-muted-foreground">
+              Enable to show album art/previews for files that have been moved by post-processing.
+              <br />
+              <strong>Note:</strong> Files are automatically moved out of the inbox after download.
+              Album art will only work if files haven&apos;t been moved yet.
+              <br />
+              <strong>Default:</strong> Disabled (recommended to prevent errors)
+            </p>
+          </div>
+        </div>
+        <div className="flex w-full flex-col space-y-4 rounded-md border p-4 shadow">
           <Label>Auto Download Settings</Label>
           <div className="flex flex-col space-y-4">
             <div className="flex items-center justify-between">

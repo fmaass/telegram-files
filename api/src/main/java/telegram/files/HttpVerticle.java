@@ -30,6 +30,7 @@ import io.vertx.ext.web.sstore.LocalSessionStore;
 import io.vertx.ext.web.sstore.SessionStore;
 import org.drinkless.tdlib.TdApi;
 import org.jooq.lambda.function.Function2;
+import telegram.files.repository.AutomationControlState;
 import telegram.files.repository.FileRecord;
 import telegram.files.repository.SettingAutoRecords;
 import telegram.files.repository.SettingKey;
@@ -176,6 +177,14 @@ public class HttpVerticle extends AbstractVerticle {
         router.post("/:telegramId/file/toggle-pause-download").handler(this::handleFileTogglePauseDownload);
         router.post("/:telegramId/file/remove").handler(this::handleFileRemove);
         router.post("/:telegramId/file/update-auto-settings").handler(this::handleAutoSettingsUpdate);
+
+        // Automation control API endpoints
+        router.get("/api/automations").handler(this::handleGetAutomations);
+        router.get("/api/automations/:chatId").handler(this::handleGetAutomation);
+        router.post("/api/automations/:chatId/start").handler(this::handleStartAutomation);
+        router.post("/api/automations/:chatId/stop").handler(this::handleStopAutomation);
+        router.post("/api/automations/:chatId/state").handler(this::handleSetAutomationState);
+        router.get("/api/automations/:chatId/health").handler(this::handleGetAutomationHealth);
 
         router.get("/files/count").handler(this::handleFilesCount);
         router.get("/files").handler(this::handleFiles);
@@ -592,7 +601,27 @@ public class HttpVerticle extends AbstractVerticle {
 
                     fileRouteHandler.handle(ctx, tuple.v1, mimeType);
                 })
-                .onFailure(ctx::fail);
+                .onFailure(throwable -> {
+                    // Check if it's a "file not found" error (normal condition - file was moved)
+                    String message = throwable.getMessage();
+                    if (message != null && message.contains("File not found")) {
+                        // Return 404 silently (log at DEBUG level only)
+                        if (log.isDebugEnabled()) {
+                            log.debug("File not found (likely moved): %s".formatted(uniqueId));
+                        }
+                        ctx.response()
+                                .setStatusCode(404)
+                                .putHeader("Content-Type", "application/json")
+                                .end(JsonObject.of(
+                                        "error", "File not found",
+                                        "uniqueId", uniqueId,
+                                        "reason", "File has been moved by post-processing"
+                                ).encode());
+                    } else {
+                        // Other errors are real server errors (500)
+                        ctx.fail(throwable);
+                    }
+                });
     }
 
     private void handleFileStartDownload(RoutingContext ctx) {
@@ -1061,5 +1090,266 @@ public class HttpVerticle extends AbstractVerticle {
             return null;
         }
         return telegramVerticleOptional.get();
+    }
+    
+    // ========== Automation Control API Endpoints ==========
+    
+    /**
+     * GET /api/automations
+     * List all automations with their control states.
+     */
+    private void handleGetAutomations(RoutingContext ctx) {
+        SettingAutoRecords autoRecords = AutomationsHolder.INSTANCE.autoRecords();
+        JsonArray automations = new JsonArray();
+        
+        for (SettingAutoRecords.Automation automation : autoRecords.automations) {
+            automation.validateControlState();
+            JsonObject autoJson = new JsonObject()
+                    .put("chatId", automation.chatId)
+                    .put("telegramId", automation.telegramId)
+                    .put("state", automation.controlState)
+                    .put("stateText", automation.getControlState().getText())
+                    .put("enabled", automation.download != null && automation.download.enabled);
+            automations.add(autoJson);
+        }
+        
+        ctx.json(new JsonObject().put("automations", automations));
+    }
+    
+    /**
+     * GET /api/automations/:chatId
+     * Get automation status for a specific chat.
+     */
+    private void handleGetAutomation(RoutingContext ctx) {
+        String chatIdStr = ctx.pathParam("chatId");
+        if (StrUtil.isBlank(chatIdStr)) {
+            ctx.fail(400);
+            return;
+        }
+        
+        long chatId = Convert.toLong(chatIdStr);
+        SettingAutoRecords autoRecords = AutomationsHolder.INSTANCE.autoRecords();
+        SettingAutoRecords.Automation automation = autoRecords.automations.stream()
+                .filter(a -> a.chatId == chatId)
+                .findFirst()
+                .orElse(null);
+        
+        if (automation == null) {
+            ctx.fail(404);
+            return;
+        }
+        
+        automation.validateControlState();
+        JsonObject response = new JsonObject()
+                .put("chatId", automation.chatId)
+                .put("telegramId", automation.telegramId)
+                .put("state", automation.controlState)
+                .put("stateText", automation.getControlState().getText())
+                .put("enabled", automation.download != null && automation.download.enabled);
+        
+        ctx.json(response);
+    }
+    
+    /**
+     * POST /api/automations/:chatId/start
+     * Start automation (set state to ACTIVE).
+     */
+    private void handleStartAutomation(RoutingContext ctx) {
+        String chatIdStr = ctx.pathParam("chatId");
+        if (StrUtil.isBlank(chatIdStr)) {
+            ctx.fail(400);
+            return;
+        }
+        
+        long chatId = Convert.toLong(chatIdStr);
+        SettingAutoRecords autoRecords = AutomationsHolder.INSTANCE.autoRecords();
+        SettingAutoRecords.Automation automation = autoRecords.automations.stream()
+                .filter(a -> a.chatId == chatId)
+                .findFirst()
+                .orElse(null);
+        
+        if (automation == null) {
+            ctx.fail(404);
+            return;
+        }
+        
+        if (automation.download == null || !automation.download.enabled) {
+            ctx.response()
+                    .setStatusCode(400)
+                    .end(JsonObject.of("error", "Automation is not enabled. Enable download first.").encode());
+            return;
+        }
+        
+        automation.setControlState(AutomationControlState.ACTIVE);
+        automation.validateControlState();
+        
+        AutomationsHolder.INSTANCE.saveAutoRecords()
+                .onSuccess(v -> {
+                    log.info("Started automation for chatId: %d".formatted(chatId));
+                    JsonObject response = new JsonObject()
+                            .put("chatId", automation.chatId)
+                            .put("state", automation.controlState)
+                            .put("stateText", automation.getControlState().getText())
+                            .put("message", "Automation started");
+                    ctx.json(response);
+                })
+                .onFailure(ctx::fail);
+    }
+    
+    /**
+     * POST /api/automations/:chatId/stop
+     * Stop automation (set state to STOPPED).
+     */
+    private void handleStopAutomation(RoutingContext ctx) {
+        String chatIdStr = ctx.pathParam("chatId");
+        if (StrUtil.isBlank(chatIdStr)) {
+            ctx.fail(400);
+            return;
+        }
+        
+        long chatId = Convert.toLong(chatIdStr);
+        SettingAutoRecords autoRecords = AutomationsHolder.INSTANCE.autoRecords();
+        SettingAutoRecords.Automation automation = autoRecords.automations.stream()
+                .filter(a -> a.chatId == chatId)
+                .findFirst()
+                .orElse(null);
+        
+        if (automation == null) {
+            ctx.fail(404);
+            return;
+        }
+        
+        automation.setControlState(AutomationControlState.STOPPED);
+        automation.validateControlState();
+        
+        AutomationsHolder.INSTANCE.saveAutoRecords()
+                .onSuccess(v -> {
+                    log.info("Stopped automation for chatId: %d".formatted(chatId));
+                    JsonObject response = new JsonObject()
+                            .put("chatId", automation.chatId)
+                            .put("state", automation.controlState)
+                            .put("stateText", automation.getControlState().getText())
+                            .put("message", "Automation stopped");
+                    ctx.json(response);
+                })
+                .onFailure(ctx::fail);
+    }
+    
+    /**
+     * POST /api/automations/:chatId/state
+     * Set automation state directly (0=STOPPED, 1=IDLE, 2=ACTIVE).
+     */
+    private void handleSetAutomationState(RoutingContext ctx) {
+        String chatIdStr = ctx.pathParam("chatId");
+        if (StrUtil.isBlank(chatIdStr)) {
+            ctx.fail(400);
+            return;
+        }
+        
+        JsonObject body = ctx.body().asJsonObject();
+        Integer stateValue = body.getInteger("state");
+        if (stateValue == null) {
+            ctx.response()
+                    .setStatusCode(400)
+                    .end(JsonObject.of("error", "Missing 'state' parameter").encode());
+            return;
+        }
+        
+        if (!AutomationControlState.isValid(stateValue)) {
+            ctx.response()
+                    .setStatusCode(400)
+                    .end(JsonObject.of("error", "Invalid state value. Must be 0 (STOPPED), 1 (IDLE), or 2 (ACTIVE)").encode());
+            return;
+        }
+        
+        long chatId = Convert.toLong(chatIdStr);
+        SettingAutoRecords autoRecords = AutomationsHolder.INSTANCE.autoRecords();
+        SettingAutoRecords.Automation automation = autoRecords.automations.stream()
+                .filter(a -> a.chatId == chatId)
+                .findFirst()
+                .orElse(null);
+        
+        if (automation == null) {
+            ctx.fail(404);
+            return;
+        }
+        
+        AutomationControlState newState = AutomationControlState.fromValue(stateValue);
+        
+        // Validate: can't set ACTIVE if disabled
+        if (newState == AutomationControlState.ACTIVE && (automation.download == null || !automation.download.enabled)) {
+            ctx.response()
+                    .setStatusCode(400)
+                    .end(JsonObject.of("error", "Cannot set state to ACTIVE when automation is disabled").encode());
+            return;
+        }
+        
+        automation.setControlState(newState);
+        automation.validateControlState();
+        
+        AutomationsHolder.INSTANCE.saveAutoRecords()
+                .onSuccess(v -> {
+                    log.info("Set automation state to %s for chatId: %d".formatted(newState.getText(), chatId));
+                    JsonObject response = new JsonObject()
+                            .put("chatId", automation.chatId)
+                            .put("state", automation.controlState)
+                            .put("stateText", automation.getControlState().getText())
+                            .put("message", "Automation state updated");
+                    ctx.json(response);
+                })
+                .onFailure(ctx::fail);
+    }
+    
+    /**
+     * GET /api/automations/:chatId/health
+     * Get automation health status including activity tracking.
+     */
+    private void handleGetAutomationHealth(RoutingContext ctx) {
+        String chatIdStr = ctx.pathParam("chatId");
+        if (StrUtil.isBlank(chatIdStr)) {
+            ctx.fail(400);
+            return;
+        }
+        
+        long chatId = Convert.toLong(chatIdStr);
+        SettingAutoRecords autoRecords = AutomationsHolder.INSTANCE.autoRecords();
+        SettingAutoRecords.Automation automation = autoRecords.automations.stream()
+                .filter(a -> a.chatId == chatId)
+                .findFirst()
+                .orElse(null);
+        
+        if (automation == null) {
+            ctx.fail(404);
+            return;
+        }
+        
+        automation.validateControlState();
+        
+        // Get file statistics
+        DataVerticle.fileRepository.countByStatus(automation.telegramId, FileRecord.DownloadStatus.downloading)
+                .compose(downloadingCount -> {
+                    return DataVerticle.fileRepository.getFiles(automation.chatId, Map.of(
+                            "downloadStatus", "idle",
+                            "limit", "1"
+                    )).map(idleResult -> {
+                        long idleCount = idleResult.v3(); // total count
+                        return Tuple2.of(downloadingCount != null ? downloadingCount : 0, idleCount);
+                    });
+                })
+                .onSuccess(result -> {
+                    int downloading = result.v1();
+                    long pending = result.v2();
+                    
+                    JsonObject response = new JsonObject()
+                            .put("chatId", automation.chatId)
+                            .put("state", automation.controlState)
+                            .put("stateText", automation.getControlState().getText())
+                            .put("isRunning", automation.isActive())
+                            .put("pendingFiles", pending)
+                            .put("downloadingFiles", downloading);
+                    
+                    ctx.json(response);
+                })
+                .onFailure(ctx::fail);
     }
 }

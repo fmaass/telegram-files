@@ -145,6 +145,7 @@ export const SettingKeys = [
   "proxys",
   "avgSpeedInterval",
   "tags",
+  "showAlbumArtForMovedFiles",
 ] as const;
 
 export type SettingKey = (typeof SettingKeys)[number];

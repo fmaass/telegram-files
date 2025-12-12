@@ -11,6 +11,7 @@ import {
 import SpoiledWrapper from "@/components/spoiled-wrapper";
 import { cn } from "@/lib/utils";
 import { getApiUrl } from "@/lib/api";
+import { useSettings } from "@/hooks/use-settings";
 
 const ImageErrorFallback = ({
   size = "s",
@@ -78,6 +79,13 @@ export default function FilePreview({
   isGalleryLayout?: boolean;
   className?: string;
 }) {
+  const { settings } = useSettings();
+  const showAlbumArtForMovedFiles = settings?.showAlbumArtForMovedFiles === "true";
+  
+  // Check if file has been moved (downloadStatus = "processed" or file doesn't exist)
+  const isFileMoved = file.downloadStatus === "processed" || 
+                      (file.downloadStatus === "completed" && !file.localPath);
+  
   const [viewportHeight, setViewportHeight] = useState(
     isFullPreview ? window.innerHeight : 288,
   );
@@ -94,7 +102,14 @@ export default function FilePreview({
     }
   }, [isFullPreview]);
 
-  const handleError = () => {
+  const handleError = (error?: Error | React.SyntheticEvent<HTMLImageElement, Event>) => {
+    // Silently handle errors for moved files (expected condition)
+    if (isFileMoved) {
+      setError(true);
+      return;
+    }
+    // Log other errors for debugging
+    console.warn('Failed to load file preview:', file.uniqueId, error);
     setError(true);
   };
 
@@ -148,13 +163,24 @@ export default function FilePreview({
   // 已下载的文件
   if (
     file.localPath &&
-    (file.type === "photo" || file.mimeType?.startsWith("image/"))
+    (file.type === "photo" || file.mimeType?.startsWith("image/")) &&
+    // Don't try to load if file is moved and setting is disabled
+    (!isFileMoved || showAlbumArtForMovedFiles)
   ) {
     if (file.extra?.width && file.extra?.height) {
       return renderImage(file.extra.width, file.extra.height, file.uniqueId);
     } else {
       return renderImage(600, 600, file.uniqueId);
     }
+  }
+  
+  // If file is moved and album art is disabled, show fallback
+  if (isFileMoved && !showAlbumArtForMovedFiles) {
+    // Show thumbnail if available, otherwise show icon
+    if (file.thumbnail) {
+      return renderImage(isFullPreview ? 600 : 32, isFullPreview ? 600 : 32, "");
+    }
+    return renderFileIcon();
   }
 
   // 含义已下载的缩略图

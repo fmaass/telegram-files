@@ -13,6 +13,7 @@ import io.vertx.core.json.Json;
 import io.vertx.core.json.JsonObject;
 import org.drinkless.tdlib.TdApi;
 import org.jooq.lambda.tuple.Tuple2;
+import telegram.files.repository.AutomationControlState;
 import telegram.files.repository.AutomationState;
 import telegram.files.repository.FileRecord;
 import telegram.files.repository.SettingAutoRecords;
@@ -80,8 +81,15 @@ public class AutoDownloadVerticle extends AbstractVerticle {
 
                                 autoRecords.getDownloadEnabledItems()
                                         .stream()
-                                        .filter(auto -> auto.download.rule.downloadHistory
-                                                        && auto.isNotComplete(AutomationState.HISTORY_DOWNLOAD_COMPLETE))
+                                        .filter(auto -> {
+                                            // Check control state - only process if not STOPPED
+                                            auto.validateControlState();
+                                            if (auto.isStopped()) {
+                                                return false;
+                                            }
+                                            return auto.download.rule.downloadHistory
+                                                    && auto.isNotComplete(AutomationState.HISTORY_DOWNLOAD_COMPLETE);
+                                        })
                                         .forEach(auto -> {
                                             if (isDownloadCommentEnabled(auto)
                                                 && CollUtil.isNotEmpty(waitingScanThreads.get(auto.telegramId))) {
@@ -135,9 +143,75 @@ public class AutoDownloadVerticle extends AbstractVerticle {
                                     log.debug("No download-enabled automations found - skipping download loop.");
                                     return;
                                 }
-                                enabledItems.forEach(auto -> downloadFromDatabase(auto.telegramId));
+                                
+                                // Check and transition states based on activity
+                                enabledItems.forEach(auto -> {
+                                    auto.validateControlState();
+                                    
+                                    if (auto.isStopped()) {
+                                        return; // Skip stopped automations
+                                    }
+                                    
+                                    // Check if there are pending files
+                                    DataVerticle.fileRepository.getFiles(auto.chatId, Map.of(
+                                            "downloadStatus", "idle",
+                                            "limit", "1"
+                                    )).compose(idleResult -> {
+                                        long pendingCount = idleResult.v3(); // total count
+                                        return DataVerticle.fileRepository.countByStatus(auto.telegramId, FileRecord.DownloadStatus.downloading)
+                                                .map(downloadingCount -> {
+                                                    int downloading = downloadingCount != null ? downloadingCount : 0;
+                                                    boolean hasActivity = pendingCount > 0 || downloading > 0;
+                                                    
+                                                    // Transition IDLE -> ACTIVE if there are pending files
+                                                    if (!auto.isActive() && hasActivity) {
+                                                        log.info("Transitioning automation from IDLE to ACTIVE for chatId: %d (pending: %d, downloading: %d)"
+                                                                .formatted(auto.chatId, pendingCount, downloading));
+                                                        auto.setControlState(AutomationControlState.ACTIVE);
+                                                        AutomationsHolder.INSTANCE.saveAutoRecords()
+                                                                .onFailure(e -> log.warn("Failed to save state transition: %s".formatted(e.getMessage())));
+                                                    }
+                                                    
+                                                    // Transition ACTIVE -> IDLE if no activity
+                                                    if (auto.isActive() && !hasActivity) {
+                                                        log.info("Transitioning automation from ACTIVE to IDLE for chatId: %d (no pending files)".formatted(auto.chatId));
+                                                        auto.setControlState(AutomationControlState.IDLE);
+                                                        AutomationsHolder.INSTANCE.saveAutoRecords()
+                                                                .onFailure(e -> log.warn("Failed to save state transition: %s".formatted(e.getMessage())));
+                                                    }
+                                                    
+                                                    // Process if ACTIVE
+                                                    if (auto.isActive()) {
+                                                        downloadFromDatabase(auto.telegramId);
+                                                    }
+                                                    
+                                                    return null;
+                                                });
+                                    }).onFailure(e -> {
+                                        log.warn("Failed to check pending files for chatId %d: %s".formatted(auto.chatId, e.getMessage()));
+                                        // On error, still try to process if ACTIVE
+                                        if (auto.isActive()) {
+                                            downloadFromDatabase(auto.telegramId);
+                                        }
+                                    });
+                                });
                             });
 
+                    // Periodic state validation and recovery (every 5 minutes)
+                    vertx.setPeriodic(5 * 60 * 1000, id -> {
+                        autoRecords.getDownloadEnabledItems().forEach(auto -> {
+                            auto.validateControlState();
+                            
+                            // Auto-recovery: if enabled but stopped, transition to IDLE
+                            if (auto.download != null && auto.download.enabled && auto.isStopped()) {
+                                log.info("Auto-recovery: Transitioning stopped automation to IDLE for chatId: %d".formatted(auto.chatId));
+                                auto.setControlState(AutomationControlState.IDLE);
+                                AutomationsHolder.INSTANCE.saveAutoRecords()
+                                        .onFailure(e -> log.warn("Failed to save auto-recovery state: %s".formatted(e.getMessage())));
+                            }
+                        });
+                    });
+                    
                     log.info("""
                             Auto download verticle started!
                             |History scan interval: %s ms
@@ -145,6 +219,7 @@ public class AutoDownloadVerticle extends AbstractVerticle {
                             |Download limit: %s per telegram account!
                             |Time limit: %s
                             |Auto chats: %s
+                            |State validation: every 5 minutes
                             """.formatted(HISTORY_SCAN_INTERVAL,
                             DOWNLOAD_INTERVAL,
                             limit,

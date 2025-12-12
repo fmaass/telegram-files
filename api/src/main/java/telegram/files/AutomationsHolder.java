@@ -44,14 +44,28 @@ public class AutomationsHolder {
                     if (settingAutoRecords == null) {
                         return;
                     }
-                    settingAutoRecords.automations.forEach(item -> TelegramVerticles.get(item.telegramId)
-                            .ifPresentOrElse(telegramVerticle -> {
-                                if (telegramVerticle.authorized) {
-                                    AUTO_RECORDS.add(item);
-                                } else {
-                                    log.warn("Init auto records fail. Telegram verticle not authorized: %s".formatted(item.telegramId));
-                                }
-                            }, () -> log.warn("Init auto records fail. Telegram verticle not found: %s".formatted(item.telegramId))));
+                    settingAutoRecords.automations.forEach(item -> {
+                        // Validate and auto-correct control state on startup
+                        item.validateControlState();
+                        
+                        // If enabled=true but state is STOPPED, auto-transition to IDLE
+                        if (item.download != null && item.download.enabled && item.isStopped()) {
+                            log.info("Auto-correcting stopped automation to IDLE for chatId: %d (enabled=true)".formatted(item.chatId));
+                            item.setControlState(telegram.files.repository.AutomationControlState.IDLE);
+                        }
+                        
+                        TelegramVerticles.get(item.telegramId)
+                                .ifPresentOrElse(telegramVerticle -> {
+                                    if (telegramVerticle.authorized) {
+                                        AUTO_RECORDS.add(item);
+                                    } else {
+                                        log.warn("Init auto records fail. Telegram verticle not authorized: %s".formatted(item.telegramId));
+                                    }
+                                }, () -> log.warn("Init auto records fail. Telegram verticle not found: %s".formatted(item.telegramId)));
+                    });
+                    
+                    // Save corrected states back to database
+                    saveAutoRecords().onFailure(e -> log.warn("Failed to save corrected automation states: %s".formatted(e.getMessage())));
                 })
                 .onFailure(e -> log.error("Init auto records failed!", e))
                 .mapEmpty();
@@ -59,6 +73,20 @@ public class AutomationsHolder {
 
     public void onAutoRecordsUpdate(SettingAutoRecords records) {
         for (SettingAutoRecords.Automation automation : records.automations) {
+            // Validate and auto-correct control state
+            automation.validateControlState();
+            
+            // Sync control state with enabled flag
+            if (automation.download != null && automation.download.enabled && automation.isStopped()) {
+                log.info("Auto-correcting stopped automation to IDLE for chatId: %d (enabled=true)".formatted(automation.chatId));
+                automation.setControlState(telegram.files.repository.AutomationControlState.IDLE);
+            } else if (automation.download == null || !automation.download.enabled) {
+                if (!automation.isStopped()) {
+                    log.info("Auto-correcting automation to STOPPED for chatId: %d (enabled=false)".formatted(automation.chatId));
+                    automation.setControlState(telegram.files.repository.AutomationControlState.STOPPED);
+                }
+            }
+            
             if (!AUTO_RECORDS.exists(automation.telegramId, automation.chatId)) {
                 // new enabled
                 TelegramVerticles.get(automation.telegramId)
@@ -76,6 +104,8 @@ public class AutomationsHolder {
                 theAutomation.preload.with(automation.preload);
                 theAutomation.download.with(automation.download);
                 theAutomation.transfer.with(automation.transfer);
+                // Update control state
+                theAutomation.controlState = automation.controlState;
                 log.info("Update auto records success: %s".formatted(automation.uniqueKey()));
             }
         }

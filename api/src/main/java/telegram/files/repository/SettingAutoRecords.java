@@ -57,6 +57,13 @@ public class SettingAutoRecords {
         public int state;
         
         /**
+         * Control state for automation execution (STOPPED/IDLE/ACTIVE).
+         * This controls whether automation is running, separate from completion phases.
+         * Defaults to IDLE if enabled=true, STOPPED if enabled=false.
+         */
+        public int controlState = -1; // -1 means not set, will be auto-corrected
+        
+        /**
          * Get automation states as enum set.
          * Converts from legacy bitwise state if needed.
          */
@@ -132,6 +139,54 @@ public class SettingAutoRecords {
         @JsonIgnore
         public boolean isNotComplete(int bitwise) {
             return !isComplete(bitwise);
+        }
+        
+        /**
+         * Get control state for automation execution.
+         * Auto-corrects invalid states based on enabled flag.
+         */
+        @JsonIgnore
+        public AutomationControlState getControlState() {
+            if (controlState == -1) {
+                // Not set - auto-correct based on enabled flag
+                return AutomationControlState.autoCorrect(0, download != null && download.enabled);
+            }
+            return AutomationControlState.autoCorrect(controlState, download != null && download.enabled);
+        }
+        
+        /**
+         * Set control state for automation execution.
+         */
+        @JsonIgnore
+        public void setControlState(AutomationControlState state) {
+            this.controlState = state.getValue();
+        }
+        
+        /**
+         * Check if automation is stopped.
+         */
+        @JsonIgnore
+        public boolean isStopped() {
+            return getControlState() == AutomationControlState.STOPPED;
+        }
+        
+        /**
+         * Check if automation is active.
+         */
+        @JsonIgnore
+        public boolean isActive() {
+            return getControlState() == AutomationControlState.ACTIVE;
+        }
+        
+        /**
+         * Validate and auto-correct control state.
+         * Should be called when loading from database or updating settings.
+         */
+        @JsonIgnore
+        public void validateControlState() {
+            boolean enabled = download != null && download.enabled;
+            AutomationControlState corrected = AutomationControlState.autoCorrect(controlState == -1 ? 0 : controlState, enabled);
+            controlState = corrected.getValue();
         }
     }
 
