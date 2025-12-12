@@ -35,6 +35,11 @@ export const DOWNLOAD_STATUS = {
     className: "bg-green-100 text-green-600",
     text: "Completed",
   },
+  processed: {
+    icon: CheckCircle2,
+    className: "bg-green-100 text-green-600",
+    text: "Processed",
+  },
   error: {
     icon: XCircle,
     className: "bg-red-100 text-red-600",
