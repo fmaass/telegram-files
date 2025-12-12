@@ -186,6 +186,7 @@ export default function FileControl({
       },
     ],
     completed: [removeBtnProps],
+    processed: [removeBtnProps], // Processed files can also be removed
   };
 
   const actionButtons = file.originalDeleted ? (
