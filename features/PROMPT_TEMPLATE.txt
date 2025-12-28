@@ -1,0 +1,60 @@
+=== COPY-PASTE THIS TO AI ASSISTANT FOR FUTURE UPGRADES ===
+
+I have a fork of jarvis2f/telegram-files at:
+https://github.com/fmaass/telegram-files
+
+The upstream repository has released a new version.
+
+**Your Task:**
+1. Upgrade my fork to the latest upstream version using the Clean Slate approach
+2. Re-implement all 5 custom features from the specifications
+
+**Instructions:**
+Read and follow the complete instructions in:
+`features/LLM_UPGRADE_INSTRUCTION.md`
+
+**Feature Specifications** (read these for implementation guidance):
+- `features/01-history-cutoff-date.md`
+- `features/02-enhanced-chat-sorting.md`
+- `features/03-chat-download-progress-badge.md`
+- `features/04-download-oldest-first.md`
+- `features/05-database-driven-download-queue.md`
+
+**Additional Context:**
+- `features/README.md` - Overview
+- `features/UPGRADE_GUIDE.md` - General strategy
+- `features/EXAMPLE_UPGRADE_0.4.0.md` - Concrete example
+
+**Requirements:**
+- Use Clean Slate approach (start from clean upstream version)
+- Implement features in order: 01 → 02 → 04 → 03 → 05
+- Run test cases for each feature
+- Verify all validation checklists
+- Report progress after each feature
+- Provide complete summary when done
+
+**Repository Access:**
+- Working directory: /Users/fabian/projects/telegram-files
+- Remote: origin (SSH: git@github.com:fmaass/telegram-files.git)
+- Upstream: upstream (https://github.com/jarvis2f/telegram-files.git)
+
+**Start the upgrade process now.**
+
+=== END OF PROMPT ===
+
+
+USAGE INSTRUCTIONS FOR FUTURE YOU:
+
+1. When upstream releases new version (e.g., 0.4.0, 0.5.0)
+2. Copy everything between "=== COPY-PASTE THIS ===" markers above
+3. Paste into a new conversation with Claude/GPT/AI assistant
+4. AI will read the LLM_UPGRADE_INSTRUCTION.md file
+5. AI will implement all 5 features from specs
+6. AI will test and verify everything
+7. AI will push the upgraded version
+
+Estimated time: 2-3 days of AI work
+Your time: ~30 minutes (reviewing and approving)
+
+THAT'S IT! The feature specs do all the work! 🚀
+
