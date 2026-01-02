@@ -37,7 +37,10 @@ public record FileRecord(int id, //file id will change
                          String tags,
                          long threadChatId, // Comment thread chat id, if the file has a comment thread
                          long messageThreadId, // The message belongs to the thread.
-                         long reactionCount // The number of reactions to the file, if applicable
+                         long reactionCount, // The number of reactions to the file, if applicable
+                         String scanState, // Discovery state: 'idle', 'scanning', 'complete'
+                         Integer downloadPriority, // Download priority (higher = more important)
+                         Long queuedAt // Timestamp (milliseconds) when file was queued for download
 ) {
 
     public enum DownloadStatus {
@@ -144,7 +147,10 @@ public record FileRecord(int id, //file id will change
                     row.getString("tags"),
                     Objects.requireNonNullElse(row.getLong("thread_chat_id"), 0L),
                     Objects.requireNonNullElse(row.getLong("message_thread_id"), 0L),
-                    row.getLong("reaction_count")
+                    row.getLong("reaction_count"),
+                    row.getString("scan_state"),
+                    row.getInteger("download_priority"),
+                    row.getLong("queued_at")
             );
 
     public static TupleMapper<FileRecord> PARAM_MAPPER = TupleMapper.mapper(FileRecord::toMap);
@@ -176,12 +182,15 @@ public record FileRecord(int id, //file id will change
                 MapUtil.entry("tags", r.tags()),
                 MapUtil.entry("thread_chat_id", r.threadChatId()),
                 MapUtil.entry("message_thread_id", r.messageThreadId()),
-                MapUtil.entry("reaction_count", r.reactionCount())
+                MapUtil.entry("reaction_count", r.reactionCount()),
+                MapUtil.entry("scan_state", r.scanState()),
+                MapUtil.entry("download_priority", r.downloadPriority()),
+                MapUtil.entry("queued_at", r.queuedAt())
         );
     }
 
     public FileRecord withSourceField(int id, long downloadedSize) {
-        return new FileRecord(id, uniqueId, telegramId, chatId, messageId, mediaAlbumId, date, hasSensitiveContent, size, downloadedSize, type, mimeType, fileName, thumbnail, thumbnailUniqueId, caption, extra, localPath, downloadStatus, transferStatus, startDate, completionDate, tags, threadChatId, messageThreadId, reactionCount);
+        return new FileRecord(id, uniqueId, telegramId, chatId, messageId, mediaAlbumId, date, hasSensitiveContent, size, downloadedSize, type, mimeType, fileName, thumbnail, thumbnailUniqueId, caption, extra, localPath, downloadStatus, transferStatus, startDate, completionDate, tags, threadChatId, messageThreadId, reactionCount, scanState, downloadPriority, queuedAt);
     }
 
     public FileRecord withThreadInfo(TdApi.MessageThreadInfo threadInfo) {
@@ -189,7 +198,7 @@ public record FileRecord(int id, //file id will change
             return this;
         }
         return new FileRecord(id, uniqueId, telegramId, chatId, messageId, mediaAlbumId, date, hasSensitiveContent, size, downloadedSize, type, mimeType, fileName, thumbnail, thumbnailUniqueId, caption, extra, localPath, downloadStatus, transferStatus, startDate, completionDate, tags,
-                threadInfo.chatId, threadInfo.messageThreadId, reactionCount);
+                threadInfo.chatId, threadInfo.messageThreadId, reactionCount, scanState, downloadPriority, queuedAt);
     }
 
     public boolean isDownloadStatus(DownloadStatus status) {
