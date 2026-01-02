@@ -773,8 +773,8 @@ public class TelegramVerticle extends AbstractVerticle {
     }
     
     private boolean isTrackDownloadedStateEnabled() {
-        SettingRecord setting = Future.await(DataVerticle.settingRepository.get(SettingKey.trackDownloadedState));
-        return setting != null && "true".equals(setting.value());
+        Boolean setting = Future.await(DataVerticle.settingRepository.<Boolean>getByKey(SettingKey.trackDownloadedState));
+        return setting != null && setting;
     }
 
     private void handleSaveAvgSpeed() {
