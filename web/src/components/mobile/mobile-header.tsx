@@ -87,7 +87,6 @@ export function MobileHeader() {
               <h3 className="text-lg font-semibold">Telegram File Manager</h3>
             )}
           </div>
->>>>>>> 8a52f04 (Add chat download progress badge with history cutoff support)
 
           <MenuDrawer />
         </div>
