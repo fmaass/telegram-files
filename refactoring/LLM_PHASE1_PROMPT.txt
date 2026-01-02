@@ -1,0 +1,72 @@
+=== COPY-PASTE THIS TO AI ASSISTANT FOR PHASE 1 REFACTORING ===
+
+I have a telegram-files fork that needs Phase 1 architectural refactoring.
+
+**Repository**: /Users/fabian/projects/telegram-files
+**Branch**: refactor/phase1-architecture
+**Current State**: Mini Phase 1 complete (ErrorHandling + DownloadStatistics utilities)
+
+**Your Task:**
+Complete the remaining Phase 1 architectural refactoring following the detailed plan.
+
+**Read These Files:**
+1. `refactoring/PHASE1_COMPLETE_PLAN.md` - Complete implementation plan
+2. `refactoring/PHASE1_TESTING_PROTOCOL.md` - Testing procedures
+3. `refactoring/PHASE1_QUALITY_GATES.md` - Success criteria
+
+**Tasks to Complete (in strict order):**
+
+**Task 1: Package Reorganization** (6 hours)
+- Move 45+ files to new packages (core, download, transfer, automation, statistics, util)
+- Update package declarations in all moved files
+- Update imports in all referencing files
+- Quality Gate: `./gradlew compileJava` succeeds
+- Commit: "refactor: reorganize packages into bounded contexts"
+
+**Task 2: Extract FileDownloadService** (8 hours)
+- Create `download/FileDownloadService.java`
+- Extract 5 methods from TelegramVerticle (300 LOC)
+- Update TelegramVerticle to delegate to service
+- Quality Gate: TelegramVerticle < 1,000 LOC
+- Commit: "refactor: extract FileDownloadService from TelegramVerticle"
+
+**Task 3: Create ServiceContext for DI** (4 hours)
+- Create `ServiceContext.java` class
+- Update DataVerticle to create context instance
+- Refactor FileDownloadService to use context
+- Refactor DownloadQueueService to use context
+- Quality Gate: No static DataVerticle.* calls in new services
+- Commit: "refactor: introduce ServiceContext for dependency injection"
+
+**Task 4: Apply ErrorHandling Patterns** (4 hours)
+- Wrap 15-20 critical code paths with ErrorHandling utility
+- Use critical(), recoverable(), optional() appropriately
+- Quality Gate: ErrorHandling used 20+ times
+- Commit: "refactor: apply unified error handling patterns"
+
+**Task 5: Standardize Async Patterns** (6 hours)
+- Remove all 23 Future.await() calls
+- Convert to reactive composition (.compose(), .map())
+- Quality Gate: Zero Future.await() in codebase
+- Commit: "refactor: remove blocking Future.await, use reactive composition"
+
+**Requirements:**
+- Follow quality gates strictly (don't proceed if gate fails)
+- Test after each task (functional + compilation)
+- Commit after each task completes
+- Report progress: "Task X complete, Y hours spent, quality gates passed"
+- If blocked, explain issue and ask for guidance
+
+**Critical Rules:**
+1. DO NOT skip quality gates
+2. DO NOT combine tasks (one commit per task)
+3. DO test after each task
+4. DO report blockers immediately
+5. DO follow the order (tasks have dependencies)
+
+**Start with Task 1: Package Reorganization**
+
+Read `refactoring/PHASE1_COMPLETE_PLAN.md` for detailed instructions.
+
+=== END OF PROMPT ===
+
