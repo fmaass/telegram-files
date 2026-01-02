@@ -303,11 +303,14 @@ public class TelegramVerticle extends AbstractVerticle {
     }
 
     public Future<FileRecord> startDownload(Long chatId, Long messageId, Integer fileId) {
-        return Future.all(
+        return ErrorHandling.critical(
+                Future.all(
                         client.execute(new TdApi.GetFile(fileId)),
                         client.execute(new TdApi.GetMessage(chatId, messageId)),
                         client.execute(new TdApi.GetMessageThread(chatId, messageId), true)
-                )
+                ),
+                String.format("Start download for file %d in chat %d", fileId, chatId)
+        )
                 .compose(results -> {
                     TdApi.File file = results.resultAt(0);
                     return DataVerticle.fileRepository.getByUniqueId(file.remote.uniqueId)
