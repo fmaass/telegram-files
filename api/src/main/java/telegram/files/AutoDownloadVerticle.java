@@ -422,6 +422,10 @@ public class AutoDownloadVerticle extends AbstractVerticle {
         } else {
             Predicate<TdApi.Message> predicate = MessageFilter.filter(rule.v3);
             
+            // Declare final variables for use in callbacks
+            final String finalNextFileType = nextFileType;
+            final long finalNextFromMessageId = nextFromMessageId;
+            
             // Check if we've reached the history cutoff date
             final boolean reachedCutoff;
             if (params.sentinelMessageDate != null && foundChatMessages.messages.length > 0) {
@@ -437,9 +441,6 @@ public class AutoDownloadVerticle extends AbstractVerticle {
             } else {
                 reachedCutoff = false;
             }
-            
-            final String finalNextFileType = nextFileType;
-            final long finalNextFromMessageId = nextFromMessageId;
             
             DataVerticle.fileRepository.getFilesByUniqueId(TdApiHelp.getFileUniqueIds(Arrays.asList(foundChatMessages.messages)))
                     .onSuccess(existFiles -> {

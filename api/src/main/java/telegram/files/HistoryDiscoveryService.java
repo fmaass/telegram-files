@@ -161,7 +161,7 @@ public class HistoryDiscoveryService {
         }
         
         searchChatMessages.filter = TdApiHelp.getSearchMessagesFilter(nextFileType);
-        searchChatMessages.messageThreadId = params.messageThreadId;
+        searchChatMessages.topicId = params.messageThreadId > 0 ? new TdApi.MessageTopicThread(params.messageThreadId) : null;
         
         telegramVerticle.client.execute(searchChatMessages)
             .onSuccess(foundChatMessages -> {
