@@ -188,6 +188,7 @@ export default function FileControl({
       },
     ],
     completed: [removeBtnProps],
+    downloaded: [removeBtnProps],
   };
 
   const actionButtons = file.originalDeleted ? (
