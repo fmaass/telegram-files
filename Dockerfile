@@ -37,7 +37,7 @@ ENV NEXT_PUBLIC_API_URL=/api \
     SKIP_ENV_VALIDATION=1
 
 COPY ./web/package*.json ./
-RUN npm ci --frozen-lockfile
+RUN npm ci
 
 COPY ./web .
 RUN npm run build
