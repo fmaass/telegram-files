@@ -163,6 +163,28 @@ export default function SettingsForm() {
               </p>
             </div>
           )}
+          <div
+            className="flex cursor-pointer flex-col space-y-4"
+            onClick={(event) =>
+              handleSwitchChange("trackDownloadedState", event)
+            }
+          >
+            <div className="flex items-center justify-between">
+              <Label>Track Downloaded State</Label>
+              <Switch
+                id="track-downloaded-state"
+                checked={settings?.trackDownloadedState === "true"}
+                onCheckedChange={() =>
+                  handleSwitchChange("trackDownloadedState")
+                }
+              />
+            </div>
+            <p className="text-xs text-muted-foreground">
+              When enabled, completed files show as "Downloaded" (purple) and
+              stay that way until moved or deleted. When disabled, files show as
+              "Completed" (green) immediately after download finishes.
+            </p>
+          </div>
         </div>
         <div className="flex w-full flex-col space-y-4 rounded-md border p-4 shadow">
           <Label>Auto Download Settings</Label>

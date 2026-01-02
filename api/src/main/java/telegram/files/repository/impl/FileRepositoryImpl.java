@@ -332,7 +332,7 @@ public class FileRepositoryImpl extends AbstractSqlRepository implements FileRep
                         SELECT COUNT(*)                                                                     AS total,
                                COUNT(CASE WHEN download_status = 'downloading' THEN 1 END)                  AS downloading,
                                COUNT(CASE WHEN download_status = 'paused' THEN 1 END)                       AS paused,
-                               COUNT(CASE WHEN download_status = 'completed' THEN 1 END)                    AS completed,
+                               COUNT(CASE WHEN download_status = 'completed' OR download_status = 'downloaded' THEN 1 END) AS completed,
                                COUNT(CASE WHEN download_status = 'error' THEN 1 END)                        AS error,
                                COUNT(CASE WHEN download_status = 'idle' THEN 1 END)                         AS idle,
                                COUNT(CASE WHEN download_status = 'completed' and type = 'photo' THEN 1 END) AS photo,
@@ -368,7 +368,7 @@ public class FileRepositoryImpl extends AbstractSqlRepository implements FileRep
                 SELECT COUNT(*)                                                                     AS total,
                        COUNT(CASE WHEN download_status = 'downloading' THEN 1 END)                  AS downloading,
                        COUNT(CASE WHEN download_status = 'paused' THEN 1 END)                       AS paused,
-                       COUNT(CASE WHEN download_status = 'completed' THEN 1 END)                    AS completed,
+                       COUNT(CASE WHEN download_status = 'completed' OR download_status = 'downloaded' THEN 1 END) AS completed,
                        COUNT(CASE WHEN download_status = 'error' THEN 1 END)                        AS error,
                        COUNT(CASE WHEN download_status = 'idle' OR download_status = 'queued' THEN 1 END) AS idle
                 FROM file_record
@@ -378,7 +378,7 @@ public class FileRepositoryImpl extends AbstractSqlRepository implements FileRep
                 SELECT COUNT(*)                                                                     AS total,
                        COUNT(CASE WHEN download_status = 'downloading' THEN 1 END)                  AS downloading,
                        COUNT(CASE WHEN download_status = 'paused' THEN 1 END)                       AS paused,
-                       COUNT(CASE WHEN download_status = 'completed' THEN 1 END)                    AS completed,
+                       COUNT(CASE WHEN download_status = 'completed' OR download_status = 'downloaded' THEN 1 END) AS completed,
                        COUNT(CASE WHEN download_status = 'error' THEN 1 END)                        AS error,
                        COUNT(CASE WHEN download_status = 'idle' OR download_status = 'queued' THEN 1 END) AS idle
                 FROM file_record
@@ -411,7 +411,7 @@ public class FileRepositoryImpl extends AbstractSqlRepository implements FileRep
         return SqlTemplate
                 .forQuery(sqlClient, """
                         SELECT COUNT(CASE WHEN download_status = 'downloading' OR download_status = 'queued' THEN 1 END) AS downloading,
-                               COUNT(CASE WHEN download_status = 'completed' THEN 1 END)                    AS completed,
+                               COUNT(CASE WHEN download_status = 'completed' OR download_status = 'downloaded' THEN 1 END) AS completed,
                                SUM(CASE WHEN download_status = 'completed' THEN size ELSE 0 END)            AS downloaded_size
                         FROM file_record
                         WHERE type != 'thumbnail'

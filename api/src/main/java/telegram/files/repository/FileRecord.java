@@ -44,7 +44,7 @@ public record FileRecord(int id, //file id will change
 ) {
 
     public enum DownloadStatus {
-        idle, downloading, paused, completed, error
+        idle, downloading, paused, completed, downloaded, error
     }
 
     public enum TransferStatus {

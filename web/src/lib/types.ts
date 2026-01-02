@@ -30,6 +30,7 @@ export type DownloadStatus =
   | "downloading"
   | "paused"
   | "completed"
+  | "downloaded"
   | "error";
 
 export type TransferStatus = "idle" | "transferring" | "completed" | "error";
@@ -145,6 +146,7 @@ export const SettingKeys = [
   "proxys",
   "avgSpeedInterval",
   "speedUnits",
+  "trackDownloadedState",
   "tags",
 ] as const;
 

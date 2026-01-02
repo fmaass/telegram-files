@@ -28,6 +28,11 @@ public enum SettingKey {
      * Speed units for displaying download speed, e.g., "bits" or "bytes"
      */
     speedUnits(Function.identity(), "bits"),
+    /**
+     * Track downloaded state persistently - when enabled, files stay in "downloaded" state
+     * until moved/deleted. When disabled, files show as "completed" immediately.
+     */
+    trackDownloadedState(Convert::toBool, false),
     tags(value -> StrUtil.isBlank(value) ? null : StrUtil.split(value, ","));
 
     public final Function<String, ?> converter;
