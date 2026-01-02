@@ -19,6 +19,7 @@ import org.jooq.lambda.tuple.Tuple;
 import org.jooq.lambda.tuple.Tuple3;
 import telegram.files.Config;
 import telegram.files.DataVerticle;
+import telegram.files.DownloadStatistics;
 import telegram.files.MessyUtils;
 import telegram.files.TelegramVerticle;
 import telegram.files.TelegramVerticles;
