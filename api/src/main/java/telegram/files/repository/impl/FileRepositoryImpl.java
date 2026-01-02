@@ -391,18 +391,16 @@ public class FileRepositoryImpl extends AbstractSqlRepository implements FileRep
         
         return SqlTemplate
                 .forQuery(sqlClient, query)
-                .mapTo(row -> {
-                    JsonObject result = JsonObject.of();
-                    result.put("total", row.getInteger("total"));
-                    result.put("downloading", row.getInteger("downloading"));
-                    result.put("paused", row.getInteger("paused"));
-                    result.put("completed", row.getInteger("completed"));
-                    result.put("error", row.getInteger("error"));
-                    result.put("idle", row.getInteger("idle"));
-                    return result;
-                })
+                .mapTo(row -> DownloadStatistics.fromRow(
+                    row.getInteger("total"),
+                    row.getInteger("downloading"),
+                    row.getInteger("paused"),
+                    row.getInteger("completed"),
+                    row.getInteger("error"),
+                    row.getInteger("idle")
+                ))
                 .execute(params)
-                .map(rs -> rs.size() > 0 ? rs.iterator().next() : JsonObject.of())
+                .map(rs -> rs.size() > 0 ? rs.iterator().next().toJson() : JsonObject.of())
                 .onFailure(err -> log.error("Failed to get chat download statistics: %s".formatted(err.getMessage())));
     }
 
