@@ -1,6 +1,6 @@
 import { type TelegramFile } from "@/lib/types";
 import { Badge } from "@/components/ui/badge";
-import React, { useMemo } from "react";
+import React from "react";
 import { cn } from "@/lib/utils";
 import { TooltipWrapper } from "@/components/ui/tooltip";
 import { AnimatePresence, motion } from "framer-motion";
@@ -65,20 +65,6 @@ export const TRANSFER_STATUS = {
   },
 };
 
-// Get or set page load time in sessionStorage to track session start
-const getPageLoadTime = (): number => {
-  if (typeof window === "undefined") return Date.now();
-  
-  const stored = sessionStorage.getItem("pageLoadTime");
-  if (stored) {
-    return parseInt(stored, 10);
-  }
-  
-  const loadTime = Date.now();
-  sessionStorage.setItem("pageLoadTime", loadTime.toString());
-  return loadTime;
-};
-
 export default function FileStatus({
   file,
   className,
@@ -96,16 +82,6 @@ export default function FileStatus({
     exit: { opacity: 0, scale: 0.9, transition: { duration: 0.2 } },
   };
   const isMobile = useIsMobile();
-  
-  // Check if file was completed before this session started
-  const isPreviouslyDownloaded = useMemo(() => {
-    if (file.downloadStatus !== "completed" || !file.completionDate) {
-      return false;
-    }
-    const pageLoadTime = getPageLoadTime();
-    // If completionDate is before page load time, it was downloaded before this session
-    return file.completionDate < pageLoadTime;
-  }, [file.downloadStatus, file.completionDate]);
 
   return (
     <div
@@ -124,16 +100,11 @@ export default function FileStatus({
               <Badge
                 className={cn(
                   "h-6 text-xs hover:bg-gray-200",
-                  // Show "Downloaded" with different color for files completed before this session
-                  file.downloadStatus === "completed" && isPreviouslyDownloaded
-                    ? "bg-purple-100 text-purple-600"
-                    : DOWNLOAD_STATUS[file.downloadStatus].className,
+                  DOWNLOAD_STATUS[file.downloadStatus].className,
                   isMobile && "shadow-none",
                 )}
               >
-                {file.downloadStatus === "completed" && isPreviouslyDownloaded
-                  ? "Downloaded"
-                  : DOWNLOAD_STATUS[file.downloadStatus].text}
+                {DOWNLOAD_STATUS[file.downloadStatus].text}
               </Badge>
             </TooltipWrapper>
           </motion.div>

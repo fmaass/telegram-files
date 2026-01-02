@@ -370,7 +370,7 @@ public class FileRepositoryImpl extends AbstractSqlRepository implements FileRep
                        COUNT(CASE WHEN download_status = 'paused' THEN 1 END)                       AS paused,
                        COUNT(CASE WHEN download_status = 'completed' THEN 1 END)                    AS completed,
                        COUNT(CASE WHEN download_status = 'error' THEN 1 END)                        AS error,
-                       COUNT(CASE WHEN download_status = 'idle' THEN 1 END)                         AS idle
+                       COUNT(CASE WHEN download_status = 'idle' OR download_status = 'queued' THEN 1 END) AS idle
                 FROM file_record
                 WHERE telegram_id = #{telegramId} AND chat_id = #{chatId} AND type != 'thumbnail'
                   AND date >= #{historySince}
@@ -380,7 +380,7 @@ public class FileRepositoryImpl extends AbstractSqlRepository implements FileRep
                        COUNT(CASE WHEN download_status = 'paused' THEN 1 END)                       AS paused,
                        COUNT(CASE WHEN download_status = 'completed' THEN 1 END)                    AS completed,
                        COUNT(CASE WHEN download_status = 'error' THEN 1 END)                        AS error,
-                       COUNT(CASE WHEN download_status = 'idle' THEN 1 END)                         AS idle
+                       COUNT(CASE WHEN download_status = 'idle' OR download_status = 'queued' THEN 1 END) AS idle
                 FROM file_record
                 WHERE telegram_id = #{telegramId} AND chat_id = #{chatId} AND type != 'thumbnail'
                 """;
@@ -410,7 +410,7 @@ public class FileRepositoryImpl extends AbstractSqlRepository implements FileRep
     public Future<JsonObject> getDownloadStatistics() {
         return SqlTemplate
                 .forQuery(sqlClient, """
-                        SELECT COUNT(CASE WHEN download_status = 'downloading' THEN 1 END)                  AS downloading,
+                        SELECT COUNT(CASE WHEN download_status = 'downloading' OR download_status = 'queued' THEN 1 END) AS downloading,
                                COUNT(CASE WHEN download_status = 'completed' THEN 1 END)                    AS completed,
                                SUM(CASE WHEN download_status = 'completed' THEN size ELSE 0 END)            AS downloaded_size
                         FROM file_record
