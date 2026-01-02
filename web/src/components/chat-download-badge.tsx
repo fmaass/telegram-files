@@ -26,7 +26,7 @@ export function ChatDownloadBadge() {
       : null,
     {
       refreshInterval: 30000, // Refresh every 30 seconds (reduced from 5s to avoid DB load)
-      dedupingInterval: 10000, // Prevent duplicate requests within 10s
+      dedupingInterval: 30000, // Match refresh interval to prevent redundant requests
       revalidateOnFocus: false, // Don't revalidate when window regains focus
     },
   );
@@ -35,7 +35,7 @@ export function ChatDownloadBadge() {
     return null;
   }
 
-  const pendingCount = stats.idle + stats.downloading;
+  const pendingCount = (stats.idle ?? 0) + (stats.downloading ?? 0);
   const isComplete = pendingCount === 0;
 
   return (

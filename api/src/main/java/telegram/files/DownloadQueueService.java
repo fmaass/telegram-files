@@ -32,6 +32,12 @@ public class DownloadQueueService {
      * @return List of FileRecord ready for download
      */
     public static Future<List<FileRecord>> getFilesReadyForDownload(long telegramId, int limit, Integer cutoffDateSeconds, Boolean downloadOldestFirst) {
+        if (telegramId <= 0) {
+            return Future.failedFuture(new IllegalArgumentException("telegramId must be positive, got: " + telegramId));
+        }
+        if (limit <= 0) {
+            return Future.failedFuture(new IllegalArgumentException("limit must be positive, got: " + limit));
+        }
         return DataVerticle.fileRepository.getFilesReadyForDownload(telegramId, limit, cutoffDateSeconds, downloadOldestFirst);
     }
     
@@ -47,7 +53,13 @@ public class DownloadQueueService {
      * @return Number of files queued
      */
     public static Future<Integer> queueFilesForDownload(long telegramId, long chatId, int limit, Integer cutoffDateSeconds, Boolean downloadOldestFirst) {
-        return DataVerticle.fileRepository.queueFilesForDownload(telegramId, chatId, limit, cutoffDateSeconds, downloadOldestFirst != null ? downloadOldestFirst : true);
+        if (telegramId <= 0) {
+            return Future.failedFuture(new IllegalArgumentException("telegramId must be positive, got: " + telegramId));
+        }
+        if (limit <= 0) {
+            return Future.failedFuture(new IllegalArgumentException("limit must be positive, got: " + limit));
+        }
+        return DataVerticle.fileRepository.queueFilesForDownload(telegramId, chatId, limit, cutoffDateSeconds, downloadOldestFirst != null ? downloadOldestFirst : false);
     }
     
     /**

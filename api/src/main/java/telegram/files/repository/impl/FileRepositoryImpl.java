@@ -363,18 +363,16 @@ public class FileRepositoryImpl extends AbstractSqlRepository implements FileRep
 
     @Override
     public Future<JsonObject> getChatDownloadStatistics(long telegramId, long chatId, Integer historySince) {
-        // Build query with optional history cutoff filter
-        String query = historySince != null ? """
-                SELECT COUNT(*)                                                                     AS total,
-                       COUNT(CASE WHEN download_status = 'downloading' THEN 1 END)                  AS downloading,
-                       COUNT(CASE WHEN download_status = 'paused' THEN 1 END)                       AS paused,
-                       COUNT(CASE WHEN download_status = 'completed' OR download_status = 'downloaded' THEN 1 END) AS completed,
-                       COUNT(CASE WHEN download_status = 'error' THEN 1 END)                        AS error,
-                       COUNT(CASE WHEN download_status = 'idle' OR download_status = 'queued' THEN 1 END) AS idle
-                FROM file_record
-                WHERE telegram_id = #{telegramId} AND chat_id = #{chatId} AND type != 'thumbnail'
-                  AND date >= #{historySince}
-                """ : """
+        // Validate parameters
+        if (telegramId <= 0 || chatId == 0) {
+            return Future.failedFuture(new IllegalArgumentException("Invalid telegramId or chatId"));
+        }
+        if (historySince != null && historySince < 0) {
+            return Future.failedFuture(new IllegalArgumentException("historySince cannot be negative"));
+        }
+        
+        // Build query with optional history cutoff filter (DRY - no duplication)
+        String baseQuery = """
                 SELECT COUNT(*)                                                                     AS total,
                        COUNT(CASE WHEN download_status = 'downloading' THEN 1 END)                  AS downloading,
                        COUNT(CASE WHEN download_status = 'paused' THEN 1 END)                       AS paused,
@@ -384,6 +382,7 @@ public class FileRepositoryImpl extends AbstractSqlRepository implements FileRep
                 FROM file_record
                 WHERE telegram_id = #{telegramId} AND chat_id = #{chatId} AND type != 'thumbnail'
                 """;
+        String query = baseQuery + (historySince != null ? " AND date >= #{historySince}" : "");
         
         Map<String, Object> params = historySince != null ?
                 Map.of("telegramId", telegramId, "chatId", chatId, "historySince", historySince) :
