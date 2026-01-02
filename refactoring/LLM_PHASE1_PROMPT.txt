@@ -1,4 +1,3 @@
-=== COPY-PASTE THIS TO AI ASSISTANT FOR PHASE 1 REFACTORING ===
 
 I have a telegram-files fork that needs Phase 1 architectural refactoring.
 
