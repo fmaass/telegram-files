@@ -1,0 +1,144 @@
+=== COPY-PASTE THIS TO AI ASSISTANT TO COMPLETE PHASE 1 ===
+
+I have a telegram-files fork with Phase 1 refactoring partially complete.
+
+**Current State**:
+- Repository: /Users/fabian/projects/telegram-files
+- Branch: refactor/phase1-clean
+- Package reorganization: ✅ COMPLETE
+- Utilities created: ✅ COMPLETE (ErrorHandling, DownloadStatistics)
+- Service extraction: ❌ NOT STARTED
+- DI migration: ❌ NOT STARTED
+
+**What Works Right Now**:
+- Compiles successfully (0 errors)
+- Deployed and running at http://localhost:8979
+- All features functional
+- Clean package structure (6 bounded contexts)
+
+**Your Task**:
+Complete the remaining Phase 1 work:
+- Task 2: Extract FileDownloadService from TelegramVerticle
+- Task 3: Initialize ServiceContext properly
+- Task 4: Complete DI migration in download package
+
+**READ THESE DOCUMENTS BEFORE STARTING**:
+1. `refactoring/PHASE1_REMAINING_WORK.md` - Step-by-step implementation guide
+2. `refactoring/COMPLETE_TESTING_GUIDE.md` - Testing after each step
+3. `refactoring/LESSONS_LEARNED.md` - What went wrong in first attempt
+
+**CRITICAL RULES YOU MUST FOLLOW**:
+
+**Rule 1: Compile After EVERY File Change** (NON-NEGOTIABLE)
+```bash
+# After modifying ANY file:
+docker build -t test .
+# If it fails: STOP, FIX, RETEST
+# NEVER proceed with compilation errors
+```
+
+**Rule 2: One Method at a Time**
+- Copy startDownload() → compile → test → commit
+- Copy cancelDownload() → compile → test → commit
+- Do NOT copy all 5 methods then try to compile
+
+**Rule 3: No Refactoring While Copying**
+- Copy EXACTLY as written in original
+- Do NOT remove Future.await()
+- Do NOT "improve" the code
+- Only update references (DataVerticle → context)
+
+**Rule 4: Test Functionality**
+- After copying each method: compile test
+- After extraction complete: functional test (start download)
+- After DI migration: full integration test
+
+**Rule 5: Commit After Every Successful Change**
+```bash
+# After each step that compiles and tests successfully:
+git add -A
+git commit -m "step: <description>"
+# This creates rollback points
+```
+
+**TASK SEQUENCE** (DO IN THIS EXACT ORDER):
+
+**Task 2: Extract FileDownloadService** (6-8 hours)
+1. Create FileDownloadService.java skeleton → compile → commit
+2. Copy startDownload() method → compile → commit
+3. Copy cancelDownload() method → compile → commit
+4. Copy togglePauseDownload() method → compile → commit
+5. Copy downloadThumbnail() method → compile → commit
+6. Copy syncFileDownloadStatus() method → compile → commit (MOST COMPLEX)
+7. Copy helper methods → compile → commit
+8. Add delegation in TelegramVerticle → compile → commit
+9. Remove old methods from TelegramVerticle → compile → commit
+10. Functional test (start download via UI) → verify → commit
+
+**Task 3: Initialize ServiceContext** (30 minutes)
+1. Add initialization in DataVerticle.start() → compile → commit
+2. Deploy and test (check logs for "ServiceContext initialized") → verify → commit
+
+**Task 4: Complete DI Migration** (4-6 hours)
+1. Convert DownloadQueueService to instance → compile → commit
+2. Update AutoDownloadVerticle to use instance → compile → commit
+3. Convert HistoryDiscoveryService to instance → compile → commit  
+4. Update callers → compile → commit
+5. Full integration test (all 14 features) → verify → commit
+
+**QUALITY GATES** (Must pass before proceeding):
+- After each method copy: BUILD SUCCESSFUL
+- After Task 2 complete: Download works
+- After Task 3 complete: No NullPointerException
+- After Task 4 complete: All features work
+
+**ERROR HANDLING**:
+- If compilation fails: STOP, show error, ask for help
+- If test fails: STOP, describe what's broken, ask for help
+- If unsure: STOP, ask for clarification
+
+**REPORTING**:
+After each step, report:
+"Step X.Y complete: <description>
+ - Compilation: ✅ PASS
+ - Commit: <hash>
+ - Ready for next step"
+
+**If you encounter errors**:
+"Step X.Y FAILED: <error>
+ - Error: <exact error message>
+ - File: <which file>
+ - Attempted fix: <what you tried>
+ - Need help: <yes/no>"
+
+**IMPORTANT LESSONS FROM FIRST ATTEMPT**:
+
+The first refactoring attempt:
+- Changed 39 files without incremental testing
+- Removed all Future.await() at once
+- Accumulated 28 compilation errors
+- Took hours to debug
+
+**DO NOT REPEAT THESE MISTAKES**:
+- ❌ Don't change multiple files before compiling
+- ❌ Don't skip quality gates to "save time"
+- ❌ Don't refactor code while copying it
+- ❌ Don't proceed with compilation errors
+
+**START WITH**:
+Read `refactoring/PHASE1_REMAINING_WORK.md`, Task 2, Step 2.1
+Create FileDownloadService skeleton
+Compile and commit
+
+**Good luck! Follow the rules and you'll succeed.** 🚀
+
+=== END OF PROMPT ===
+
+USAGE FOR FUTURE YOU:
+1. When ready to complete Phase 1
+2. Copy everything between === markers
+3. Paste into new AI conversation
+4. AI will follow the detailed plan
+5. Review and approve each commit
+6. Estimated time: 15 hours of AI work, 2 hours of your review
+
