@@ -17,6 +17,7 @@ import org.jooq.lambda.tuple.Tuple;
 import telegram.files.repository.FileRecord;
 import telegram.files.repository.SettingAutoRecords;
 import telegram.files.repository.SettingKey;
+import telegram.files.automation.AutomationsHolder;
 import telegram.files.repository.StatisticRecord;
 
 import java.util.*;

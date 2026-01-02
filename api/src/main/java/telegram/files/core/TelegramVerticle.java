@@ -1,4 +1,4 @@
-package telegram.files;
+package telegram.files.core;
 
 
 import cn.hutool.core.bean.BeanUtil;
@@ -22,6 +22,14 @@ import org.drinkless.tdlib.TdApi;
 import org.jooq.lambda.tuple.Tuple;
 import org.jooq.lambda.tuple.Tuple2;
 import telegram.files.repository.*;
+import telegram.files.statistics.AvgSpeed;
+import telegram.files.util.DateUtils;
+import telegram.files.util.ErrorHandling;
+import telegram.files.TelegramConverter;
+import telegram.files.DataVerticle;
+import telegram.files.TdApiHelp;
+import telegram.files.FileRecordRetriever;
+import telegram.files.automation.AutomationsHolder;
 
 import java.io.File;
 import java.nio.file.Files;

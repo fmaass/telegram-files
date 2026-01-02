@@ -1,4 +1,4 @@
-package telegram.files;
+package telegram.files.core;
 
 import cn.hutool.core.convert.Convert;
 import cn.hutool.core.io.FileUtil;

@@ -6,6 +6,8 @@ import cn.hutool.log.LogFactory;
 import io.vertx.core.Vertx;
 import telegram.files.maintains.AlbumCaptionMaintainVerticle;
 import telegram.files.maintains.MaintainVerticle;
+import telegram.files.core.EventEnum;
+import telegram.files.core.Config;
 import telegram.files.maintains.ThumbnailMaintainVerticle;
 
 public class Maintain {

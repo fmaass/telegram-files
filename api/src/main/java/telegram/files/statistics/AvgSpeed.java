@@ -1,4 +1,4 @@
-package telegram.files;
+package telegram.files.statistics;
 
 import java.util.ArrayList;
 import java.util.List;

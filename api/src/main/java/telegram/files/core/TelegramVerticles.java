@@ -1,4 +1,4 @@
-package telegram.files;
+package telegram.files.core;
 
 import cn.hutool.core.collection.CollUtil;
 import cn.hutool.core.convert.Convert;
@@ -10,6 +10,7 @@ import io.vertx.core.Future;
 import io.vertx.core.Vertx;
 import io.vertx.core.VertxException;
 import telegram.files.repository.TelegramRecord;
+import telegram.files.DataVerticle;
 
 import java.io.File;
 import java.util.ArrayList;

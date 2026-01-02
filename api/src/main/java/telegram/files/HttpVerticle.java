@@ -34,6 +34,18 @@ import telegram.files.repository.FileRecord;
 import telegram.files.repository.SettingAutoRecords;
 import telegram.files.repository.SettingKey;
 import telegram.files.repository.SettingRecord;
+import telegram.files.core.EventPayload;
+import telegram.files.core.Start;
+import telegram.files.core.Config;
+import telegram.files.core.TelegramVerticle;
+import telegram.files.core.TelegramVerticles;
+import telegram.files.core.EventPayload;
+import telegram.files.core.Start;
+import telegram.files.download.AutoDownloadVerticle;
+import telegram.files.download.PreloadMessageVerticle;
+import telegram.files.transfer.TransferVerticle;
+import telegram.files.automation.AutomationsHolder;
+import telegram.files.core.EventEnum;
 
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;

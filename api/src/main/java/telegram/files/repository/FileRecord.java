@@ -6,7 +6,7 @@ import cn.hutool.core.map.MapUtil;
 import io.vertx.sqlclient.templates.RowMapper;
 import io.vertx.sqlclient.templates.TupleMapper;
 import org.drinkless.tdlib.TdApi;
-import telegram.files.Config;
+import telegram.files.core.Config;
 
 import java.util.Map;
 import java.util.Objects;

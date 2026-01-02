@@ -1,4 +1,4 @@
-package telegram.files;
+package telegram.files.automation;
 
 import cn.hutool.core.collection.CollUtil;
 import cn.hutool.log.Log;
@@ -6,7 +6,9 @@ import cn.hutool.log.LogFactory;
 import io.vertx.core.Future;
 import io.vertx.core.json.Json;
 import telegram.files.repository.SettingAutoRecords;
+import telegram.files.core.TelegramVerticles;
 import telegram.files.repository.SettingKey;
+import telegram.files.DataVerticle;
 
 import java.util.ArrayList;
 import java.util.List;

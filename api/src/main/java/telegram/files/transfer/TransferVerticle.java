@@ -1,4 +1,4 @@
-package telegram.files;
+package telegram.files.transfer;
 
 import cn.hutool.core.collection.CollUtil;
 import cn.hutool.core.util.StrUtil;
@@ -12,6 +12,14 @@ import org.jooq.lambda.tuple.Tuple3;
 import telegram.files.repository.AutomationState;
 import telegram.files.repository.FileRecord;
 import telegram.files.repository.SettingAutoRecords;
+import telegram.files.DataVerticle;
+import telegram.files.core.EventEnum;
+import telegram.files.core.EventPayload;
+import telegram.files.automation.AutomationsHolder;
+import telegram.files.core.EventEnum;
+import telegram.files.core.EventPayload;
+import telegram.files.core.EventEnum;
+import telegram.files.core.EventPayload;
 
 import java.util.HashMap;
 import java.util.List;

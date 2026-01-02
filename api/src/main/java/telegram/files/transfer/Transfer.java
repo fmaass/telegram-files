@@ -1,4 +1,4 @@
-package telegram.files;
+package telegram.files.transfer;
 
 import cn.hutool.core.convert.Convert;
 import cn.hutool.core.io.FileUtil;
@@ -16,6 +16,8 @@ import com.openai.models.chat.completions.StructuredChatCompletionCreateParams;
 import io.vertx.core.json.JsonObject;
 import telegram.files.repository.FileRecord;
 import telegram.files.repository.SettingAutoRecords;
+import telegram.files.MessyUtils;
+import telegram.files.core.Config;
 
 import java.io.File;
 import java.nio.file.Path;

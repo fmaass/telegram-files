@@ -6,6 +6,12 @@ import io.vertx.core.Future;
 import io.vertx.core.json.JsonObject;
 import org.drinkless.tdlib.TdApi;
 import telegram.files.repository.FileRecord;
+import telegram.files.core.TelegramVerticle;
+import telegram.files.core.TelegramVerticles;
+import telegram.files.core.TelegramClient;
+import telegram.files.core.TelegramVerticle;
+import telegram.files.core.TelegramVerticles;
+import telegram.files.core.TelegramClient;
 
 import java.util.*;
 import java.util.stream.Collectors;

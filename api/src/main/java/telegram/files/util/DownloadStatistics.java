@@ -1,4 +1,4 @@
-package telegram.files;
+package telegram.files.util;
 
 import io.vertx.core.json.JsonObject;
 

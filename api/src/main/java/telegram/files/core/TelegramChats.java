@@ -1,4 +1,4 @@
-package telegram.files;
+package telegram.files.core;
 
 import cn.hutool.core.util.StrUtil;
 import cn.hutool.log.Log;

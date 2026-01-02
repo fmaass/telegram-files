@@ -1,4 +1,4 @@
-package telegram.files;
+package telegram.files.util;
 
 import cn.hutool.log.Log;
 import cn.hutool.log.LogFactory;

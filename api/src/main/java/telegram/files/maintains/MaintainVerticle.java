@@ -7,10 +7,10 @@ import io.vertx.core.AbstractVerticle;
 import io.vertx.core.Future;
 import io.vertx.core.Promise;
 import io.vertx.core.json.JsonObject;
-import telegram.files.Config;
+import telegram.files.core.Config;
 import telegram.files.DataVerticle;
-import telegram.files.EventEnum;
-import telegram.files.TelegramVerticles;
+import telegram.files.core.EventEnum;
+import telegram.files.core.TelegramVerticles;
 
 public class MaintainVerticle extends AbstractVerticle {
 

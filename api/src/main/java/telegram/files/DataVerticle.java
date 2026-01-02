@@ -15,6 +15,8 @@ import io.vertx.sqlclient.Pool;
 import io.vertx.sqlclient.PoolOptions;
 import io.vertx.sqlclient.SqlClient;
 import io.vertx.sqlclient.SqlConnectOptions;
+import telegram.files.core.Config;
+import telegram.files.core.Start;
 import org.jooq.lambda.tuple.Tuple;
 import telegram.files.repository.*;
 import telegram.files.repository.impl.FileRepositoryImpl;

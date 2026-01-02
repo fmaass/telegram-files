@@ -1,4 +1,4 @@
-package telegram.files;
+package telegram.files.download;
 
 import cn.hutool.core.collection.CollUtil;
 import cn.hutool.core.util.StrUtil;
@@ -9,6 +9,11 @@ import org.drinkless.tdlib.TdApi;
 import org.jooq.lambda.tuple.Tuple2;
 import telegram.files.repository.FileRecord;
 import telegram.files.repository.SettingAutoRecords;
+import telegram.files.core.TelegramVerticle;
+import telegram.files.core.TelegramVerticles;
+import telegram.files.DataVerticle;
+import telegram.files.TdApiHelp;
+import telegram.files.util.DateUtils;
 
 import java.util.Arrays;
 import java.util.List;

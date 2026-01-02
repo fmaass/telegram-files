@@ -2,7 +2,7 @@ package telegram.files.repository;
 
 import io.vertx.sqlclient.templates.RowMapper;
 import io.vertx.sqlclient.templates.TupleMapper;
-import telegram.files.Config;
+import telegram.files.core.Config;
 
 import java.util.Map;
 

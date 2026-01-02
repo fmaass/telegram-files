@@ -1,4 +1,4 @@
-package telegram.files;
+package telegram.files.core;
 
 public enum EventEnum {
 

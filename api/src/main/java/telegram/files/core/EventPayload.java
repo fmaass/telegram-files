@@ -1,4 +1,4 @@
-package telegram.files;
+package telegram.files.core;
 
 public record EventPayload(int type, String code, Object data, long timestamp) {
     public static final int TYPE_ERROR = -1;

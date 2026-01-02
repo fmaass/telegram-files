@@ -3,7 +3,7 @@ package telegram.files.repository;
 import com.fasterxml.jackson.annotation.JsonIgnore;
 import io.vertx.core.json.JsonObject;
 import telegram.files.MessyUtils;
-import telegram.files.Transfer;
+import telegram.files.transfer.Transfer;
 
 import java.util.ArrayList;
 import java.util.EnumSet;

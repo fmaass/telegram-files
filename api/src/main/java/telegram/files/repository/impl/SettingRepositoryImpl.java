@@ -8,7 +8,7 @@ import cn.hutool.log.LogFactory;
 import io.vertx.core.Future;
 import io.vertx.sqlclient.SqlClient;
 import io.vertx.sqlclient.templates.SqlTemplate;
-import telegram.files.Config;
+import telegram.files.core.Config;
 import telegram.files.repository.SettingKey;
 import telegram.files.repository.SettingRecord;
 import telegram.files.repository.SettingRepository;

@@ -1,4 +1,4 @@
-package telegram.files;
+package telegram.files.core;
 
 import org.drinkless.tdlib.TdApi;
 

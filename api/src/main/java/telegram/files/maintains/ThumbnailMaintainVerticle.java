@@ -10,6 +10,8 @@ import io.vertx.core.json.JsonObject;
 import io.vertx.sqlclient.templates.SqlTemplate;
 import org.drinkless.tdlib.TdApi;
 import telegram.files.*;
+import telegram.files.core.*;
+import telegram.files.DataVerticle;
 import telegram.files.repository.FileRecord;
 
 import java.util.List;
