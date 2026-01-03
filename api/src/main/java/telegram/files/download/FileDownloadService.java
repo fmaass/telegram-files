@@ -162,6 +162,31 @@ public class FileDownloadService {
                 JsonObject.of("telegramId", this.telegramId, "payload", JsonObject.mapFrom(payload)));
     }
     
+    public Future<Void> cancelDownload(Integer fileId) {
+        return client.execute(new TdApi.GetFile(fileId))
+                .compose(file -> context.fileRepository()
+                        .updateFileId(file.id, file.remote.uniqueId)
+                        .map(file)
+                )
+                .compose(file -> {
+                    if (file.local == null) {
+                        return Future.failedFuture("File not started downloading");
+                    }
+
+                    return client.execute(new TdApi.CancelDownloadFile(fileId, false))
+                            .map(file);
+                })
+                .compose(file -> client.execute(new TdApi.DeleteFile(fileId)).map(file))
+                .compose(file -> context.fileRepository().deleteByUniqueId(file.remote.uniqueId).map(file))
+                .onSuccess(file ->
+                        sendEvent(EventPayload.build(EventPayload.TYPE_FILE_STATUS, new JsonObject()
+                                .put("fileId", fileId)
+                                .put("uniqueId", file.remote.uniqueId)
+                                .put("downloadStatus", FileRecord.DownloadStatus.idle)
+                        )))
+                .mapEmpty();
+    }
+    
     // Placeholder methods - will be implemented in subsequent steps
     private Future<Void> syncFileDownloadStatus(TdApi.File file, TdApi.Message message, TdApi.MessageThreadInfo messageThreadInfo) {
         // Will be implemented in Step 2.6
