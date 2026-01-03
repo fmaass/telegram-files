@@ -12,6 +12,7 @@ import telegram.files.repository.SettingAutoRecords;
 import telegram.files.core.TelegramVerticle;
 import telegram.files.core.TelegramVerticles;
 import telegram.files.DataVerticle;
+import telegram.files.ServiceContext;
 import telegram.files.TdApiHelp;
 import telegram.files.util.DateUtils;
 
@@ -39,6 +40,14 @@ public class HistoryDiscoveryService {
     
     private static final Log log = LogFactory.get();
     
+    private final ServiceContext context;
+    private final DownloadQueueService queueService;
+    
+    public HistoryDiscoveryService(ServiceContext context) {
+        this.context = context;
+        this.queueService = new DownloadQueueService(context);
+    }
+    
     private static final int MAX_HISTORY_SCAN_TIME = 10 * 1000;
     private static final int MAX_BATCH_SIZE = 100;
     private static final int MAX_IDLE_FILES_TO_QUEUE = 1000;
@@ -51,7 +60,7 @@ public class HistoryDiscoveryService {
      * @param callback Called with scan result (nextFileType, nextFromMessageId, isComplete)
      * @param currentTimeMillis Start time for timeout checking
      */
-    public static void discoverHistory(SettingAutoRecords.Automation automation,
+    public void discoverHistory(SettingAutoRecords.Automation automation,
                                        Consumer<DiscoveryResult> callback,
                                        long currentTimeMillis) {
         DiscoveryParams params = new DiscoveryParams(
@@ -96,13 +105,13 @@ public class HistoryDiscoveryService {
     /**
      * Overloaded method that accepts DiscoveryParams directly (for comment threads)
      */
-    public static void discoverHistory(DiscoveryParams params,
+    public void discoverHistory(DiscoveryParams params,
                                        Consumer<DiscoveryResult> callback,
                                        long currentTimeMillis) {
         discoverHistoryInternal(params, callback, currentTimeMillis);
     }
     
-    private static void discoverHistoryInternal(DiscoveryParams params,
+    private void discoverHistoryInternal(DiscoveryParams params,
                                        Consumer<DiscoveryResult> callback,
                                        long currentTimeMillis) {
         String uniqueKey = params.uniqueKey;
@@ -189,7 +198,7 @@ public class HistoryDiscoveryService {
             });
     }
     
-    private static void handleNoMessagesFound(DiscoveryParams params,
+    private void handleNoMessagesFound(DiscoveryParams params,
                                              Tuple2<String, List<String>> rule,
                                              String nextFileType,
                                              boolean downloadOldestFirst,
@@ -209,7 +218,7 @@ public class HistoryDiscoveryService {
             discoverHistoryInternal(params, callback, currentTimeMillis);
         } else {
             // All file types exhausted - check if we should reset or mark complete
-            DataVerticle.fileRepository.getMinMessageId(telegramId, chatId)
+            context.fileRepository().getMinMessageId(telegramId, chatId)
                 .onSuccess(oldestMsgId -> {
                     if (oldestMsgId != null && oldestMsgId > 0 && params.nextFromMessageId > oldestMsgId) {
                         // Beyond newest message, reset to scan backwards
@@ -238,7 +247,7 @@ public class HistoryDiscoveryService {
         }
     }
     
-    private static void processDiscoveredMessages(DiscoveryParams params,
+    private void processDiscoveredMessages(DiscoveryParams params,
                                                  TdApi.FoundChatMessages foundChatMessages,
                                                  String nextFileType,
                                                  long nextFromMessageId,
@@ -267,7 +276,7 @@ public class HistoryDiscoveryService {
         }
         
         // Check which messages already exist in database
-        DataVerticle.fileRepository.getFilesByUniqueId(TdApiHelp.getFileUniqueIds(Arrays.asList(foundChatMessages.messages)))
+        context.fileRepository().getFilesByUniqueId(TdApiHelp.getFileUniqueIds(Arrays.asList(foundChatMessages.messages)))
             .onSuccess(existFiles -> {
                 // Filter messages: new ones or existing ones with idle status
                 // Use historySince (configured cutoff date) for filtering, not sentinelMessageDate
@@ -297,7 +306,7 @@ public class HistoryDiscoveryService {
                         // Use historySince (configured cutoff date) for filtering, not sentinelMessageDate
                         Integer cutoffForQueueing = params.rule != null && params.rule.historySince != null && params.rule.historySince > 0 
                             ? params.rule.historySince : params.sentinelMessageDate;
-                        DownloadQueueService.queueFilesForDownload(telegramId, chatId, MAX_IDLE_FILES_TO_QUEUE, cutoffForQueueing, params.rule != null ? params.rule.downloadOldestFirst : null)
+                        queueService.queueFilesForDownload(telegramId, chatId, MAX_IDLE_FILES_TO_QUEUE, cutoffForQueueing, params.rule != null ? params.rule.downloadOldestFirst : null)
                             .onSuccess(queued -> {
                                 if (queued > 0) {
                                     log.info("Queued %d existing idle files for download after discovery complete. ChatId: %d".formatted(queued, chatId));
@@ -324,7 +333,7 @@ public class HistoryDiscoveryService {
                             // Use historySince (configured cutoff date) for filtering, not sentinelMessageDate
                             Integer cutoffForQueueing = params.rule != null && params.rule.historySince != null && params.rule.historySince > 0 
                                 ? params.rule.historySince : params.sentinelMessageDate;
-                            return DownloadQueueService.queueFilesForDownload(telegramId, chatId, messagesToProcess.size(), cutoffForQueueing, params.rule != null ? params.rule.downloadOldestFirst : null)
+                            return queueService.queueFilesForDownload(telegramId, chatId, messagesToProcess.size(), cutoffForQueueing, params.rule != null ? params.rule.downloadOldestFirst : null)
                                 .map(queued -> {
                                     log.info("%s Queued %d of %d files for download".formatted(uniqueKey, queued, messagesToProcess.size()));
                                     return count;
@@ -356,7 +365,7 @@ public class HistoryDiscoveryService {
      * Persist discovered files to database with scan_state='idle'.
      * Files are inserted or updated, but NOT queued for download.
      */
-    private static Future<Integer> persistDiscoveredFiles(long telegramId, List<TdApi.Message> messages, String uniqueKey) {
+    private Future<Integer> persistDiscoveredFiles(long telegramId, List<TdApi.Message> messages, String uniqueKey) {
         java.util.concurrent.atomic.AtomicInteger count = new java.util.concurrent.atomic.AtomicInteger(0);
         
         return Future.all(messages.stream()
@@ -374,7 +383,7 @@ public class HistoryDiscoveryService {
                     return Future.succeededFuture();
                 }
                 
-                return DataVerticle.fileRepository.createIfNotExist(fileRecord)
+                return context.fileRepository().createIfNotExist(fileRecord)
                     .compose(created -> {
                         if (created) {
                             count.incrementAndGet();
@@ -382,7 +391,7 @@ public class HistoryDiscoveryService {
                             return Future.succeededFuture();
                         } else {
                             // File exists - check if we need to update it
-                            return DataVerticle.fileRepository.getByUniqueId(fileRecord.uniqueId())
+                            return context.fileRepository().getByUniqueId(fileRecord.uniqueId())
                                 .compose(existing -> {
                                     if (existing == null) {
                                         return Future.succeededFuture();
@@ -398,7 +407,7 @@ public class HistoryDiscoveryService {
                                     }
                                     if (currentStatus != FileRecord.DownloadStatus.idle && currentStatus != FileRecord.DownloadStatus.completed) {
                                         // Reset non-idle/non-completed files to idle for retry
-                                        return DataVerticle.fileRepository.updateDownloadStatus(
+                                        return context.fileRepository().updateDownloadStatus(
                                             existing.id(),
                                             existing.uniqueId(),
                                             null,
@@ -418,7 +427,7 @@ public class HistoryDiscoveryService {
             .map(count.get());
     }
     
-    private static Tuple2<String, List<String>> handleRule(SettingAutoRecords.DownloadRule rule) {
+    private Tuple2<String, List<String>> handleRule(SettingAutoRecords.DownloadRule rule) {
         String query = null;
         List<String> fileTypes = DEFAULT_FILE_TYPE_ORDER;
         if (rule != null) {
