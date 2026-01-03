@@ -20,6 +20,7 @@ import telegram.files.core.TelegramRunException;
 import telegram.files.core.TelegramVerticle;
 import telegram.files.core.TelegramVerticles;
 import telegram.files.DataVerticle;
+import telegram.files.ServiceContext;
 import telegram.files.TdApiHelp;
 import telegram.files.MessageFilter;
 import telegram.files.util.DateUtils;
@@ -70,6 +71,9 @@ public class AutoDownloadVerticle extends AbstractVerticle {
 
     private SettingTimeLimitedDownload timeLimited;
 
+    private ServiceContext context;
+    private DownloadQueueService queueService;
+
     public AutoDownloadVerticle() {
         this.autoRecords = AutomationsHolder.INSTANCE.autoRecords();
         AutomationsHolder.INSTANCE.registerOnRemoveListener(removedItems -> removedItems.forEach(item ->
@@ -79,6 +83,8 @@ public class AutoDownloadVerticle extends AbstractVerticle {
 
     @Override
     public void start(Promise<Void> startPromise) {
+        this.context = ServiceContext.fromDataVerticle();
+        this.queueService = new DownloadQueueService(context);
         initAutoDownload()
                 .onFailure(err -> log.error("initAutoDownload() failed: %s".formatted(err.getMessage())))
                 .compose(v -> this.initEventConsumer())
@@ -737,7 +743,7 @@ public class AutoDownloadVerticle extends AbstractVerticle {
      * Files should already be in database from discovery, so we just mark them as queued.
      */
     private Future<Boolean> queueNewMessagesForDownload(long telegramId, long chatId, int limit) {
-        return DownloadQueueService.queueFilesForDownload(telegramId, chatId, limit, null, null)
+        return queueService.queueFilesForDownload(telegramId, chatId, limit, null, null)
             .map(count -> {
                 if (count > 0) {
                     log.debug("Queued %d new messages for download in database. TelegramId: %d ChatId: %d"
@@ -841,13 +847,13 @@ public class AutoDownloadVerticle extends AbstractVerticle {
         Boolean downloadOldestFirst = automation != null && automation.download != null && automation.download.rule != null
             ? automation.download.rule.downloadOldestFirst : null;
         
-        DownloadQueueService.queueFilesForDownload(telegramId, 0, queueLimit, cutoffDateSeconds, downloadOldestFirst)
+        queueService.queueFilesForDownload(telegramId, 0, queueLimit, cutoffDateSeconds, downloadOldestFirst)
             .compose(queuedCount -> {
                 if (queuedCount > 0) {
                     log.debug("Queued %d idle files for download. TelegramId: %d".formatted(queuedCount, telegramId));
                 }
                 // Then get files to download
-                return DownloadQueueService.getFilesForDownload(telegramId, limit);
+                return queueService.getFilesForDownload(telegramId, limit);
             })
             .onSuccess(files -> processDownloadFiles(telegramId, files))
             .onFailure(err -> log.error("Failed to queue/get files for download from database: %s".formatted(err.getMessage())));
@@ -921,7 +927,7 @@ public class AutoDownloadVerticle extends AbstractVerticle {
                                                 log.debug("Created new file record for message %d in chat %d".formatted(messageId, chatId));
                                             }
                                             // Queue for download (whether newly created or already exists)
-                                            return DownloadQueueService.queueFilesForDownload(telegramId, chatId, 5, null, null);
+                                            return queueService.queueFilesForDownload(telegramId, chatId, 5, null, null);
                                         })
                                         .onSuccess(queued -> {
                                             if (queued > 0) {
