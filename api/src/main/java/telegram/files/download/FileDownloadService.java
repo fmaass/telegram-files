@@ -219,14 +219,34 @@ public class FileDownloadService {
                 .mapEmpty();
     }
     
-    // Placeholder methods - will be implemented in subsequent steps
+    public Future<Boolean> downloadThumbnail(Long chatId, Long messageId, FileRecord thumbnailRecord) {
+        if (thumbnailRecord == null) {
+            return Future.succeededFuture(false);
+        }
+        return context.fileRepository().createIfNotExist(thumbnailRecord)
+                .compose(created -> {
+                    if (!created) {
+                        return context.fileRepository().updateFileId(thumbnailRecord.id(), thumbnailRecord.uniqueId());
+                    }
+                    return Future.succeededFuture();
+                })
+                .compose(ignore -> {
+                    if (thumbnailRecord.isDownloadStatus(FileRecord.DownloadStatus.completed)) {
+                        return Future.succeededFuture(false);
+                    }
+                    return client.execute(new TdApi.AddFileToDownloads(thumbnailRecord.id(), chatId, messageId, 32))
+                            .map(true);
+                })
+                .onSuccess(download -> {
+                    if (download) {
+                        log.debug("[%s] Download thumbnail: %s".formatted(this.rootId, thumbnailRecord.uniqueId()));
+                    }
+                });
+    }
+    
+    // Placeholder method - will be implemented in subsequent steps
     private Future<Void> syncFileDownloadStatus(TdApi.File file, TdApi.Message message, TdApi.MessageThreadInfo messageThreadInfo) {
         // Will be implemented in Step 2.6
         return Future.failedFuture("syncFileDownloadStatus not yet implemented");
-    }
-    
-    private Future<Boolean> downloadThumbnail(Long chatId, Long messageId, FileRecord thumbnailRecord) {
-        // Will be implemented in Step 2.5
-        return Future.failedFuture("downloadThumbnail not yet implemented");
     }
 }
