@@ -13,6 +13,7 @@ import telegram.files.core.TelegramVerticle;
 import telegram.files.core.TelegramVerticles;
 import telegram.files.core.TelegramRunException;
 import telegram.files.DataVerticle;
+import telegram.files.ServiceContext;
 import telegram.files.TdApiHelp;
 import telegram.files.repository.AutomationState;
 import telegram.files.repository.FileRecord;
@@ -29,6 +30,7 @@ public class PreloadMessageVerticle extends AbstractVerticle {
     private static final int MAX_HISTORY_SCAN_TIME = 10 * 1000;
 
     private final SettingAutoRecords autoRecords;
+    private ServiceContext context;
 
     public PreloadMessageVerticle() {
         this.autoRecords = AutomationsHolder.INSTANCE.autoRecords();
@@ -36,6 +38,7 @@ public class PreloadMessageVerticle extends AbstractVerticle {
 
     @Override
     public void start(Promise<Void> startPromise) {
+        this.context = ServiceContext.fromDataVerticle();
         initEventConsumer()
                 .onSuccess(_ -> {
                     vertx.setPeriodic(0, HISTORY_SCAN_INTERVAL,
@@ -110,7 +113,7 @@ public class PreloadMessageVerticle extends AbstractVerticle {
             TdApi.MessageThreadInfo messageThreadInfo = Future.await(telegramVerticle.client
                     .execute(new TdApi.GetMessageThread(message.chatId, message.id), true));
             FileRecord fileRecord = fileHandlerOptional.get().convertFileRecord(auto.telegramId).withThreadInfo(messageThreadInfo);
-            if (Future.await(DataVerticle.fileRepository.createIfNotExist(fileRecord))) {
+            if (Future.await(context.fileRepository().createIfNotExist(fileRecord))) {
                 count++;
             }
         }
@@ -142,7 +145,7 @@ public class PreloadMessageVerticle extends AbstractVerticle {
                                 TdApi.MessageThreadInfo messageThreadInfo = result.resultAt(1);
                                 TdApiHelp.getFileHandler(message).ifPresent(fileHandler -> {
                                     FileRecord fileRecord = fileHandler.convertFileRecord(telegramId).withThreadInfo(messageThreadInfo);
-                                    DataVerticle.fileRepository.createIfNotExist(fileRecord);
+                                    context.fileRepository().createIfNotExist(fileRecord);
                                 });
                             })
                             .onFailure(e -> log.error("Preload message fail. Get message failed: %s".formatted(e.getMessage())));

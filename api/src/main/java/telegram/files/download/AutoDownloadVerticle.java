@@ -120,7 +120,7 @@ public class AutoDownloadVerticle extends AbstractVerticle {
                                                     );
                                                 } else {
                                                     // If discovery is complete, check if there are any idle files left
-                                                    DataVerticle.fileRepository.getFiles(auto.chatId, Map.of(
+                                                    context.fileRepository().getFiles(auto.chatId, Map.of(
                                                         "downloadStatus", "idle",
                                                         "limit", "1"
                                                     )).onSuccess(result -> {
@@ -183,8 +183,8 @@ public class AutoDownloadVerticle extends AbstractVerticle {
 
     private Future<Void> initAutoDownload() {
         return Future.all(
-                        DataVerticle.settingRepository.<Integer>getByKey(SettingKey.autoDownloadLimit),
-                        DataVerticle.settingRepository.<SettingTimeLimitedDownload>getByKey(SettingKey.autoDownloadTimeLimited)
+                        context.settingRepository().<Integer>getByKey(SettingKey.autoDownloadLimit),
+                        context.settingRepository().<SettingTimeLimitedDownload>getByKey(SettingKey.autoDownloadTimeLimited)
                 )
                 .onSuccess(results -> {
                     if (results.resultAt(0) != null) {
@@ -410,7 +410,7 @@ public class AutoDownloadVerticle extends AbstractVerticle {
                 // Check if nextFromMessageId is beyond newest message (should scan backwards)
                 // If we have a high nextFromMessageId but no messages, try scanning backwards
                 Long oldestMsgId = Future.await(
-                    DataVerticle.fileRepository.getMinMessageId(telegramId, chatId)
+                    context.fileRepository().getMinMessageId(telegramId, chatId)
                 );
                 
                 // If we have files downloaded and nextFromMessageId is beyond the newest, reset to scan backwards
@@ -457,7 +457,7 @@ public class AutoDownloadVerticle extends AbstractVerticle {
                 reachedCutoff = false;
             }
             
-            DataVerticle.fileRepository.getFilesByUniqueId(TdApiHelp.getFileUniqueIds(Arrays.asList(foundChatMessages.messages)))
+            context.fileRepository().getFilesByUniqueId(TdApiHelp.getFileUniqueIds(Arrays.asList(foundChatMessages.messages)))
                     .onSuccess(existFiles -> {
                         List<TdApi.Message> messages = Stream.of(foundChatMessages.messages)
                                 .parallel()
@@ -485,7 +485,7 @@ public class AutoDownloadVerticle extends AbstractVerticle {
                                 
                                 // Query database for existing idle files post-cutoff and queue them for download
                                 if (params.sentinelMessageDate != null) {
-                                    DataVerticle.fileRepository.getFiles(chatId, Map.of(
+                                    context.fileRepository().getFiles(chatId, Map.of(
                                         "downloadStatus", "idle",
                                         "types", "audio,file",
                                         "limit", "50"  // Queue up to 50 files at a time to avoid overwhelming
@@ -549,7 +549,7 @@ public class AutoDownloadVerticle extends AbstractVerticle {
                                 // If we're scanning forwards and hit 0, try scanning backwards
                                 if (foundChatMessages.nextFromMessageId == 0 && nextFromMessageId > 0) {
                                     Long oldestMsgId = Future.await(
-                                        DataVerticle.fileRepository.getMinMessageId(telegramId, chatId)
+                                        context.fileRepository().getMinMessageId(telegramId, chatId)
                                     );
                                     
                                     if (oldestMsgId != null && oldestMsgId > 0 && nextFromMessageId > oldestMsgId) {
@@ -572,7 +572,7 @@ public class AutoDownloadVerticle extends AbstractVerticle {
                                 
                                 // Query database for existing idle files post-cutoff and queue them for download
                                 if (params.sentinelMessageDate != null) {
-                                    DataVerticle.fileRepository.getFiles(chatId, Map.of(
+                                    context.fileRepository().getFiles(chatId, Map.of(
                                         "downloadStatus", "idle",
                                         "types", "audio,file",
                                         "limit", "50"
@@ -633,7 +633,7 @@ public class AutoDownloadVerticle extends AbstractVerticle {
                                 // If we're scanning forwards and hit 0, try scanning backwards
                                 if (foundChatMessages.nextFromMessageId == 0 && nextFromMessageId > 0) {
                                     Long oldestMsgId = Future.await(
-                                        DataVerticle.fileRepository.getMinMessageId(telegramId, chatId)
+                                        context.fileRepository().getMinMessageId(telegramId, chatId)
                                     );
                                     
                                     if (oldestMsgId != null && oldestMsgId > 0 && nextFromMessageId > oldestMsgId) {
@@ -696,7 +696,7 @@ public class AutoDownloadVerticle extends AbstractVerticle {
     }
 
     private int getSurplusSize(long telegramId) {
-        Integer downloading = Future.await(DataVerticle.fileRepository.countByStatus(telegramId, FileRecord.DownloadStatus.downloading));
+        Integer downloading = Future.await(context.fileRepository().countByStatus(telegramId, FileRecord.DownloadStatus.downloading));
         return downloading == null ? limit : Math.max(0, limit - downloading);
     }
 
@@ -923,7 +923,7 @@ public class AutoDownloadVerticle extends AbstractVerticle {
                                 if (handlerOpt.isPresent()) {
                                     TdApiHelp.FileHandler<?> handler = handlerOpt.get();
                                     FileRecord fileRecord = handler.convertFileRecord(telegramId);
-                                    DataVerticle.fileRepository.createIfNotExist(fileRecord)
+                                    context.fileRepository().createIfNotExist(fileRecord)
                                         .compose(created -> {
                                             if (created) {
                                                 log.debug("Created new file record for message %d in chat %d".formatted(messageId, chatId));
