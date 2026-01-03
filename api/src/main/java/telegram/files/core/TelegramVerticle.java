@@ -631,9 +631,13 @@ public class TelegramVerticle extends AbstractVerticle {
         log.error(e);
     }
     
-    private boolean isTrackDownloadedStateEnabled() {
-        Boolean setting = Future.await(DataVerticle.settingRepository.<Boolean>getByKey(SettingKey.trackDownloadedState));
-        return setting != null && setting;
+    private Future<Boolean> isTrackDownloadedStateEnabled() {
+        return ErrorHandling.recoverable(
+            DataVerticle.settingRepository.<Boolean>getByKey(SettingKey.trackDownloadedState)
+                .map(setting -> setting != null && setting),
+            false,
+            String.format("[%s] Fetch trackDownloadedState setting", getRootId())
+        );
     }
 
     private void handleSaveAvgSpeed() {
@@ -781,21 +785,23 @@ public class TelegramVerticle extends AbstractVerticle {
                             if (downloadStatus == null) {
                                 downloadStatus = FileRecord.DownloadStatus.idle;
                             }
-                            // Determine final status based on trackDownloadedState setting
-                            FileRecord.DownloadStatus finalStatus = downloadStatus;
-                            if (downloadStatus == FileRecord.DownloadStatus.completed && 
-                                finalLocalPath != null && 
-                                isTrackDownloadedStateEnabled()) {
-                                // When setting is enabled and file exists, use "downloaded" status
-                                finalStatus = FileRecord.DownloadStatus.downloaded;
+                            // Determine final status based on trackDownloadedState setting (async)
+                            Future<FileRecord.DownloadStatus> statusFuture;
+                            if (downloadStatus == FileRecord.DownloadStatus.completed && finalLocalPath != null) {
+                                statusFuture = isTrackDownloadedStateEnabled().map(trackEnabled -> 
+                                    trackEnabled ? FileRecord.DownloadStatus.downloaded : FileRecord.DownloadStatus.completed
+                                );
+                            } else {
+                                statusFuture = Future.succeededFuture(downloadStatus);
                             }
                             
-                            DataVerticle.fileRepository.updateDownloadStatus(file.id,
-                                            file.remote.uniqueId,
-                                            finalLocalPath,
-                                            finalStatus,
-                                            finalCompletionDate)
-                                    .onSuccess(r -> {
+                            statusFuture.compose(finalStatus -> 
+                                DataVerticle.fileRepository.updateDownloadStatus(file.id,
+                                                file.remote.uniqueId,
+                                                finalLocalPath,
+                                                finalStatus,
+                                                finalCompletionDate)
+                            ).onSuccess(r -> {
                                         sendFileStatusHttpEvent(file, r);
                                         
                                         // Set file modification time to match original Telegram upload date
