@@ -116,7 +116,11 @@ public class TelegramVerticle extends AbstractVerticle {
         telegramUpdateHandler.setOnMessageReceived(this::onMessageReceived);
 
         client.initialize(telegramUpdateHandler, this::handleException, this::handleException);
-        long telegramId = telegramRecord != null ? telegramRecord.id() : Long.parseLong(getRootId());
+        // Initialize downloadService - telegramRecord should always be set in production, but handle null case
+        if (telegramRecord == null) {
+            log.warn("[%s] TelegramRecord is null, downloadService may not work correctly".formatted(getRootId()));
+        }
+        long telegramId = telegramRecord != null ? telegramRecord.id() : 0L;
         this.downloadService = new FileDownloadService(this.client, ServiceContext.fromDataVerticle(), telegramId, vertx, getRootId());
         Future.all(initEventConsumer(), initAvgSpeed())
                 .compose(_ -> this.enableProxy(this.proxyName))
