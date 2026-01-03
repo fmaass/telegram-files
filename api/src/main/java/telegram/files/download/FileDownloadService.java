@@ -187,6 +187,38 @@ public class FileDownloadService {
                 .mapEmpty();
     }
     
+    public Future<Void> togglePauseDownload(Integer fileId, boolean isPaused) {
+        return client.execute(new TdApi.GetFile(fileId))
+                .compose(file -> context.fileRepository()
+                        .updateFileId(file.id, file.remote.uniqueId)
+                        .map(file)
+                )
+                .compose(file -> {
+                    if (file.local == null) {
+                        return Future.failedFuture("File not started downloading");
+                    }
+                    if (file.local.isDownloadingCompleted) {
+                        return syncFileDownloadStatus(file, null, null).mapEmpty();
+                    }
+                    if (isPaused && !file.local.isDownloadingActive) {
+                        return Future.failedFuture("File is not downloading");
+                    }
+                    if (!isPaused && file.local.isDownloadingActive) {
+                        return Future.failedFuture("File is downloading");
+                    }
+                    if (!isPaused && !file.local.canBeDeleted) {
+                        // Maybe the file is not exist, so we need to redownload it
+                        return context.fileRepository().getByUniqueId(file.remote.uniqueId)
+                                .compose(fileRecord ->
+                                        client.execute(new TdApi.AddFileToDownloads(fileId, fileRecord.chatId(), fileRecord.messageId(), 32)))
+                                .mapEmpty();
+                    }
+
+                    return client.execute(new TdApi.ToggleDownloadIsPaused(fileId, isPaused));
+                })
+                .mapEmpty();
+    }
+    
     // Placeholder methods - will be implemented in subsequent steps
     private Future<Void> syncFileDownloadStatus(TdApi.File file, TdApi.Message message, TdApi.MessageThreadInfo messageThreadInfo) {
         // Will be implemented in Step 2.6
