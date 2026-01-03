@@ -96,7 +96,7 @@ shadowJar {
     archiveVersion.set('')
     manifest {
         attributes(
-                'Main-Class': 'telegram.files.Start'
+                'Main-Class': 'telegram.files.core.Start'
         )
     }
 }
