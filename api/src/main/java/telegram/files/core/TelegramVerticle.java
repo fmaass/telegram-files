@@ -27,9 +27,11 @@ import telegram.files.util.DateUtils;
 import telegram.files.util.ErrorHandling;
 import telegram.files.TelegramConverter;
 import telegram.files.DataVerticle;
+import telegram.files.ServiceContext;
 import telegram.files.TdApiHelp;
 import telegram.files.FileRecordRetriever;
 import telegram.files.automation.AutomationsHolder;
+import telegram.files.download.FileDownloadService;
 
 import java.io.File;
 import java.nio.file.Files;
@@ -68,6 +70,8 @@ public class TelegramVerticle extends AbstractVerticle {
     public TelegramRecord telegramRecord;
 
     private AvgSpeed avgSpeed = new AvgSpeed();
+
+    private FileDownloadService downloadService;
 
     private long avgSpeedPersistenceTimerId;
 
@@ -112,6 +116,7 @@ public class TelegramVerticle extends AbstractVerticle {
         telegramUpdateHandler.setOnMessageReceived(this::onMessageReceived);
 
         client.initialize(telegramUpdateHandler, this::handleException, this::handleException);
+        this.downloadService = new FileDownloadService(this.client, ServiceContext.fromDataVerticle(), this.telegramRecord.id(), vertx, getRootId());
         Future.all(initEventConsumer(), initAvgSpeed())
                 .compose(_ -> this.enableProxy(this.proxyName))
                 .onSuccess(_ -> startPromise.complete())
@@ -311,181 +316,19 @@ public class TelegramVerticle extends AbstractVerticle {
     }
 
     public Future<FileRecord> startDownload(Long chatId, Long messageId, Integer fileId) {
-        return ErrorHandling.critical(
-                Future.all(
-                        client.execute(new TdApi.GetFile(fileId)),
-                        client.execute(new TdApi.GetMessage(chatId, messageId)),
-                        client.execute(new TdApi.GetMessageThread(chatId, messageId), true)
-                ),
-                String.format("Start download for file %d in chat %d", fileId, chatId)
-        )
-                .compose(results -> {
-                    TdApi.File file = results.resultAt(0);
-                    return DataVerticle.fileRepository.getByUniqueId(file.remote.uniqueId)
-                            .map(fileRecord -> Tuple.tuple(file,
-                                    results.<TdApi.Message>resultAt(1),
-                                    results.<TdApi.MessageThreadInfo>resultAt(2),
-                                    fileRecord
-                            ));
-                })
-                .compose(results -> {
-                    TdApi.File file = results.v1;
-                    TdApi.Message message = results.v2;
-                    TdApi.MessageThreadInfo messageThreadInfo = results.v3;
-                    FileRecord dbFileRecord = results.v4;
-                    if (file.local != null) {
-                        if (file.local.isDownloadingCompleted) {
-                            return syncFileDownloadStatus(file, message, messageThreadInfo)
-                                    .compose(_ -> DataVerticle.fileRepository.getByUniqueId(file.remote.uniqueId));
-                        }
-                        if (file.local.isDownloadingActive) {
-                            return Future.failedFuture("File is downloading");
-                        }
-//                        return Future.failedFuture("Unknown file download status");
-                    }
-                    if (dbFileRecord != null && !dbFileRecord.isDownloadStatus(FileRecord.DownloadStatus.idle)) {
-                        return Future.failedFuture("File is already downloading or completed");
-                    }
-
-                    TdApiHelp.FileHandler<? extends TdApi.MessageContent> fileHandler = TdApiHelp.getFileHandler(message)
-                            .orElseThrow(() -> VertxException.noStackTrace("not support message type"));
-                    FileRecord fileRecord = fileHandler.convertFileRecord(telegramRecord.id()).withThreadInfo(messageThreadInfo);
-                    return DataVerticle.fileRepository.createIfNotExist(fileRecord)
-                            .compose(created -> {
-                                if (!created) {
-                                    // FileRecord already exists, get it and update file ID if needed
-                                    return DataVerticle.fileRepository.getByUniqueId(fileRecord.uniqueId())
-                                            .compose(existingRecord -> {
-                                                if (existingRecord == null) {
-                                                    return Future.succeededFuture(fileRecord);
-                                                }
-                                                // Update file ID if needed
-                                                return DataVerticle.fileRepository.updateFileId(fileRecord.id(), fileRecord.uniqueId())
-                                                        .map(ignore -> existingRecord);
-                                            });
-                                }
-                                // FileRecord was just created, return it
-                                return Future.succeededFuture(fileRecord);
-                            })
-                            .compose(record -> {
-                                // Check if we should start the download
-                                // Don't start if already downloading or completed
-                                if (record.isDownloadStatus(FileRecord.DownloadStatus.downloading) ||
-                                    record.isDownloadStatus(FileRecord.DownloadStatus.completed)) {
-                                    return Future.succeededFuture(record);
-                                }
-                                
-                                // Update status to downloading before starting (if it was idle)
-                                Future<FileRecord> statusUpdateFuture;
-                                if (record.isDownloadStatus(FileRecord.DownloadStatus.idle)) {
-                                    statusUpdateFuture = DataVerticle.fileRepository.updateDownloadStatus(
-                                            record.id(),
-                                            record.uniqueId(),
-                                            null,
-                                            FileRecord.DownloadStatus.downloading,
-                                            null
-                                    ).map(ignore -> record);
-                                } else {
-                                    statusUpdateFuture = Future.succeededFuture(record);
-                                }
-                                
-                                // Start the download
-                                return statusUpdateFuture
-                                        .compose(updatedRecord -> client.execute(new TdApi.AddFileToDownloads(fileId, chatId, messageId, 32))
-                                                .onSuccess(ignore -> {
-                                                    sendEvent(EventPayload.build(EventPayload.TYPE_FILE_STATUS, new JsonObject()
-                                                            .put("fileId", fileId)
-                                                            .put("uniqueId", updatedRecord.uniqueId())
-                                                            .put("downloadStatus", FileRecord.DownloadStatus.downloading)
-                                                    ));
-
-                                                    downloadThumbnail(chatId, messageId, fileHandler.convertThumbnailRecord(telegramRecord.id()));
-                                                })
-                                                .map(ignore -> updatedRecord));
-                            });
-                });
+        return downloadService.startDownload(chatId, messageId, fileId);
     }
 
     public Future<Boolean> downloadThumbnail(Long chatId, Long messageId, FileRecord thumbnailRecord) {
-        if (thumbnailRecord == null) {
-            return Future.succeededFuture(false);
-        }
-        return DataVerticle.fileRepository.createIfNotExist(thumbnailRecord)
-                .compose(created -> {
-                    if (!created) {
-                        return DataVerticle.fileRepository.updateFileId(thumbnailRecord.id(), thumbnailRecord.uniqueId());
-                    }
-                    return Future.succeededFuture();
-                })
-                .compose(ignore -> {
-                    if (thumbnailRecord.isDownloadStatus(FileRecord.DownloadStatus.completed)) {
-                        return Future.succeededFuture(false);
-                    }
-                    return client.execute(new TdApi.AddFileToDownloads(thumbnailRecord.id(), chatId, messageId, 32))
-                            .map(true);
-                })
-                .onSuccess(download -> {
-                    if (download) {
-                        log.debug("[%s] Download thumbnail: %s".formatted(this.getRootId(), thumbnailRecord.uniqueId()));
-                    }
-                });
+        return downloadService.downloadThumbnail(chatId, messageId, thumbnailRecord);
     }
 
     public Future<Void> cancelDownload(Integer fileId) {
-        return client.execute(new TdApi.GetFile(fileId))
-                .compose(file -> DataVerticle.fileRepository
-                        .updateFileId(file.id, file.remote.uniqueId)
-                        .map(file)
-                )
-                .compose(file -> {
-                    if (file.local == null) {
-                        return Future.failedFuture("File not started downloading");
-                    }
-
-                    return client.execute(new TdApi.CancelDownloadFile(fileId, false))
-                            .map(file);
-                })
-                .compose(file -> client.execute(new TdApi.DeleteFile(fileId)).map(file))
-                .compose(file -> DataVerticle.fileRepository.deleteByUniqueId(file.remote.uniqueId).map(file))
-                .onSuccess(file ->
-                        sendEvent(EventPayload.build(EventPayload.TYPE_FILE_STATUS, new JsonObject()
-                                .put("fileId", fileId)
-                                .put("uniqueId", file.remote.uniqueId)
-                                .put("downloadStatus", FileRecord.DownloadStatus.idle)
-                        )))
-                .mapEmpty();
+        return downloadService.cancelDownload(fileId);
     }
 
     public Future<Void> togglePauseDownload(Integer fileId, boolean isPaused) {
-        return client.execute(new TdApi.GetFile(fileId))
-                .compose(file -> DataVerticle.fileRepository
-                        .updateFileId(file.id, file.remote.uniqueId)
-                        .map(file)
-                )
-                .compose(file -> {
-                    if (file.local == null) {
-                        return Future.failedFuture("File not started downloading");
-                    }
-                    if (file.local.isDownloadingCompleted) {
-                        return syncFileDownloadStatus(file, null, null).mapEmpty();
-                    }
-                    if (isPaused && !file.local.isDownloadingActive) {
-                        return Future.failedFuture("File is not downloading");
-                    }
-                    if (!isPaused && file.local.isDownloadingActive) {
-                        return Future.failedFuture("File is downloading");
-                    }
-                    if (!isPaused && !file.local.canBeDeleted) {
-                        // Maybe the file is not exist, so we need to redownload it
-                        return DataVerticle.fileRepository.getByUniqueId(file.remote.uniqueId)
-                                .compose(fileRecord ->
-                                        client.execute(new TdApi.AddFileToDownloads(fileId, fileRecord.chatId(), fileRecord.messageId(), 32)))
-                                .mapEmpty();
-                    }
-
-                    return client.execute(new TdApi.ToggleDownloadIsPaused(fileId, isPaused));
-                })
-                .mapEmpty();
+        return downloadService.togglePauseDownload(fileId, isPaused);
     }
 
     public Future<Void> removeFile(Integer fileId, String uniqueId) {
