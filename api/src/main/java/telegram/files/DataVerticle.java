@@ -41,6 +41,8 @@ public class DataVerticle extends AbstractVerticle {
 
     public static StatisticRepository statisticRepository;
 
+    public static ServiceContext serviceContext;
+
     private static SqlConnectOptions sqlConnectOptions;
 
     public static final List<Definition> definitions;
