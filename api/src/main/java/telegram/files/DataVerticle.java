@@ -72,6 +72,15 @@ public class DataVerticle extends AbstractVerticle {
         telegramRepository = new TelegramRepositoryImpl(pool);
         fileRepository = new FileRepositoryImpl(pool);
         statisticRepository = new StatisticRepositoryImpl(pool);
+        
+        // Initialize ServiceContext for dependency injection
+        serviceContext = new ServiceContext(
+            fileRepository,
+            telegramRepository,
+            settingRepository,
+            statisticRepository
+        );
+        log.info("ServiceContext initialized successfully");
         isCompletelyNewInitialization()
                 .compose(isNew -> Future.all(definitions.stream().map(d -> d.createTable(pool)).toList()).map(isNew))
                 .compose(isNew -> settingRepository.<Version>getByKey(SettingKey.version).map(version -> Tuple.tuple(isNew, version)))
