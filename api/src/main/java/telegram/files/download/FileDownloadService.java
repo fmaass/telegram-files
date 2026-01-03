@@ -1,5 +1,6 @@
 package telegram.files.download;
 
+import cn.hutool.core.date.DateUtil;
 import cn.hutool.core.io.FileUtil;
 import cn.hutool.core.util.StrUtil;
 import cn.hutool.log.Log;
@@ -7,6 +8,7 @@ import cn.hutool.log.LogFactory;
 import io.vertx.core.Future;
 import io.vertx.core.VertxException;
 import io.vertx.core.Vertx;
+import io.vertx.core.json.Json;
 import io.vertx.core.json.JsonObject;
 import org.drinkless.tdlib.TdApi;
 import org.jooq.lambda.tuple.Tuple;
@@ -24,6 +26,7 @@ import telegram.files.util.DateUtils;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.attribute.FileTime;
+import java.util.List;
 
 /**
  * Service responsible for file download operations.
@@ -244,9 +247,131 @@ public class FileDownloadService {
                 });
     }
     
-    // Placeholder method - will be implemented in subsequent steps
     private Future<Void> syncFileDownloadStatus(TdApi.File file, TdApi.Message message, TdApi.MessageThreadInfo messageThreadInfo) {
-        // Will be implemented in Step 2.6
-        return Future.failedFuture("syncFileDownloadStatus not yet implemented");
+        return context.fileRepository()
+                .getByUniqueId(file.remote.uniqueId)
+                .compose(fileRecord -> {
+                    if (fileRecord != null) {
+                        FileRecord finalFileRecord = fileRecord;
+                        // Use "downloaded" if setting enabled, otherwise "completed"
+                        FileRecord.DownloadStatus finalStatus = isTrackDownloadedStateEnabled() 
+                            ? FileRecord.DownloadStatus.downloaded 
+                            : FileRecord.DownloadStatus.completed;
+                        
+                        return context.fileRepository().updateDownloadStatus(
+                                file.id,
+                                file.remote.uniqueId,
+                                file.local.path,
+                                finalStatus,
+                                System.currentTimeMillis()
+                        ).onSuccess(r -> {
+                            // Set file modification time to match original Telegram upload date
+                            if (file.local.path != null && finalFileRecord.date() > 0) {
+                                try {
+                                    Path filePath = Path.of(file.local.path);
+                                    if (Files.exists(filePath)) {
+                                        FileTime originalTime = FileTime.fromMillis(finalFileRecord.date() * 1000L);
+                                        Files.setLastModifiedTime(filePath, originalTime);
+                                        log.debug("Set file modification time for {} to {}", filePath.getFileName(), 
+                                                 DateUtil.date(finalFileRecord.date() * 1000L));
+                                    }
+                                } catch (Exception e) {
+                                    log.warn("Failed to set file modification time for {}: {}", 
+                                            file.local.path, e.getMessage());
+                                }
+                            }
+                        });
+                    }
+
+                    if (message == null) {
+                        return Future.failedFuture("File not found");
+                    }
+
+                    FileRecord newFileRecord = TdApiHelp.getFileHandler(message)
+                            .orElseThrow(() -> VertxException.noStackTrace("not support message type"))
+                            .convertFileRecord(telegramId)
+                            .withThreadInfo(messageThreadInfo);
+
+                    return context.fileRepository().create(newFileRecord)
+                            .compose(r -> context.fileRepository().updateDownloadStatus(
+                                    file.id,
+                                    file.remote.uniqueId,
+                                    file.local.path,
+                                    FileRecord.DownloadStatus.completed,
+                                    System.currentTimeMillis()
+                            ).onSuccess(updateResult -> {
+                                // Set file modification time to match original Telegram upload date
+                                if (file.local.path != null && newFileRecord.date() > 0) {
+                                    try {
+                                        Path filePath = Path.of(file.local.path);
+                                        if (Files.exists(filePath)) {
+                                            FileTime originalTime = FileTime.fromMillis(newFileRecord.date() * 1000L);
+                                            Files.setLastModifiedTime(filePath, originalTime);
+                                            log.debug("Set file modification time for {} to {}", filePath.getFileName(), 
+                                                     DateUtil.date(newFileRecord.date() * 1000L));
+                                        }
+                                    } catch (Exception e) {
+                                        log.warn("Failed to set file modification time for {}: {}", 
+                                                file.local.path, e.getMessage());
+                                    }
+                                }
+                            }));
+                })
+                .compose(r -> {
+                    sendFileStatusHttpEvent(file, r);
+                    if (r == null || r.isEmpty()) {
+                        return Future.failedFuture("File is downloaded completed, but update status failed");
+                    } else {
+                        return Future.failedFuture("File is already downloaded successfully");
+                    }
+                });
+    }
+    
+    private boolean isTrackDownloadedStateEnabled() {
+        Boolean setting = Future.await(context.settingRepository().<Boolean>getByKey(SettingKey.trackDownloadedState));
+        return setting != null && setting;
+    }
+    
+    private void sendFileStatusHttpEvent(TdApi.File file, JsonObject fileUpdated) {
+        if (fileUpdated == null || fileUpdated.isEmpty()) return;
+
+        JsonObject statusData = new JsonObject()
+                .put("fileId", file.id)
+                .put("uniqueId", file.remote.uniqueId)
+                .put("downloadStatus", fileUpdated.getString("downloadStatus"))
+                .put("localPath", fileUpdated.getString("localPath"))
+                .put("completionDate", fileUpdated.getLong("completionDate"))
+                .put("downloadedSize", file.local.downloadedSize);
+
+        // 如果文件下载完成，尝试获取并包含缩略图文件信息
+        if ("completed".equals(fileUpdated.getString("downloadStatus"))) {
+            context.fileRepository().getByUniqueId(file.remote.uniqueId)
+                    .compose(mainFileRecord -> {
+                        if (mainFileRecord != null && mainFileRecord.thumbnailUniqueId() != null) {
+                            return FileRecordRetriever.getThumbnails(List.of(mainFileRecord))
+                                    .map(thumbnailMap -> {
+                                        FileRecord thumbnailRecord = thumbnailMap.get(mainFileRecord.thumbnailUniqueId());
+                                        if (thumbnailRecord != null && thumbnailRecord.isDownloadStatus(FileRecord.DownloadStatus.completed)) {
+                                            statusData.put("thumbnailFile", JsonObject.of(
+                                                    "uniqueId", thumbnailRecord.uniqueId(),
+                                                    "mimeType", thumbnailRecord.mimeType(),
+                                                    "extra", StrUtil.isBlank(thumbnailRecord.extra()) ? null : Json.decodeValue(thumbnailRecord.extra())
+                                            ));
+                                        }
+                                        return statusData;
+                                    });
+                        }
+                        return Future.succeededFuture(statusData);
+                    })
+                    .onSuccess(finalStatusData -> sendEvent(EventPayload.build(EventPayload.TYPE_FILE_STATUS, finalStatusData)))
+                    .onFailure(err -> {
+                        // 如果获取缩略图失败，仍然发送基本状态信息
+                        log.error("Failed to get thumbnail info for file: %s, error: %s".formatted(file.remote.uniqueId, err.getMessage()));
+                        sendEvent(EventPayload.build(EventPayload.TYPE_FILE_STATUS, statusData));
+                    });
+        } else {
+            // 非完成状态直接发送
+            sendEvent(EventPayload.build(EventPayload.TYPE_FILE_STATUS, statusData));
+        }
     }
 }
