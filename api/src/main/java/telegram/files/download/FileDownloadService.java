@@ -253,18 +253,20 @@ public class FileDownloadService {
                 .compose(fileRecord -> {
                     if (fileRecord != null) {
                         FileRecord finalFileRecord = fileRecord;
-                        // Use "downloaded" if setting enabled, otherwise "completed"
-                        FileRecord.DownloadStatus finalStatus = isTrackDownloadedStateEnabled() 
-                            ? FileRecord.DownloadStatus.downloaded 
-                            : FileRecord.DownloadStatus.completed;
-                        
-                        return context.fileRepository().updateDownloadStatus(
-                                file.id,
-                                file.remote.uniqueId,
-                                file.local.path,
-                                finalStatus,
-                                System.currentTimeMillis()
-                        ).onSuccess(r -> {
+                        // Use "downloaded" if setting enabled, otherwise "completed" (async)
+                        return isTrackDownloadedStateEnabled().compose(trackEnabled -> {
+                            FileRecord.DownloadStatus finalStatus = trackEnabled 
+                                ? FileRecord.DownloadStatus.downloaded 
+                                : FileRecord.DownloadStatus.completed;
+                            
+                            return context.fileRepository().updateDownloadStatus(
+                                    file.id,
+                                    file.remote.uniqueId,
+                                    file.local.path,
+                                    finalStatus,
+                                    System.currentTimeMillis()
+                            );
+                        }).onSuccess(r -> {
                             // Set file modification time to match original Telegram upload date
                             if (file.local.path != null && finalFileRecord.date() > 0) {
                                 try {
@@ -327,9 +329,26 @@ public class FileDownloadService {
                 });
     }
     
-    private boolean isTrackDownloadedStateEnabled() {
-        Boolean setting = Future.await(context.settingRepository().<Boolean>getByKey(SettingKey.trackDownloadedState));
-        return setting != null && setting;
+    private Future<Boolean> isTrackDownloadedStateEnabled() {
+        // Check cache first
+        long now = System.currentTimeMillis();
+        if (trackDownloadedStateCache != null && (now - trackDownloadedStateCacheTime) < CACHE_TTL_MS) {
+            return Future.succeededFuture(trackDownloadedStateCache);
+        }
+        
+        // Cache miss - fetch from DB (non-blocking)
+        return context.settingRepository().<Boolean>getByKey(SettingKey.trackDownloadedState)
+                .map(setting -> {
+                    trackDownloadedStateCache = setting != null && setting;
+                    trackDownloadedStateCacheTime = now;
+                    return trackDownloadedStateCache;
+                })
+                .recover(err -> {
+                    log.warn("Failed to fetch trackDownloadedState setting: {}", err.getMessage());
+                    trackDownloadedStateCache = false;
+                    trackDownloadedStateCacheTime = now;
+                    return Future.succeededFuture(false);
+                });
     }
     
     private void sendFileStatusHttpEvent(TdApi.File file, JsonObject fileUpdated) {
