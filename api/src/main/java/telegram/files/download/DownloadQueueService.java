@@ -4,7 +4,7 @@ import cn.hutool.core.collection.CollUtil;
 import cn.hutool.log.Log;
 import cn.hutool.log.LogFactory;
 import io.vertx.core.Future;
-import telegram.files.DataVerticle;
+import telegram.files.ServiceContext;
 import telegram.files.repository.FileRecord;
 
 import java.util.List;
@@ -22,6 +22,12 @@ public class DownloadQueueService {
     
     private static final Log log = LogFactory.get();
     
+    private final ServiceContext context;
+    
+    public DownloadQueueService(ServiceContext context) {
+        this.context = context;
+    }
+    
     /**
      * Get files ready for download from the database.
      * Files are ordered by priority (higher first) and queued_at (older first).
@@ -32,8 +38,8 @@ public class DownloadQueueService {
      * @param downloadOldestFirst If true, order by message_id ASC (oldest first), else DESC (newest first).
      * @return List of FileRecord ready for download
      */
-    public static Future<List<FileRecord>> getFilesReadyForDownload(long telegramId, int limit, Integer cutoffDateSeconds, Boolean downloadOldestFirst) {
-        return DataVerticle.fileRepository.getFilesReadyForDownload(telegramId, limit, cutoffDateSeconds, downloadOldestFirst);
+    public Future<List<FileRecord>> getFilesReadyForDownload(long telegramId, int limit, Integer cutoffDateSeconds, Boolean downloadOldestFirst) {
+        return context.fileRepository().getFilesReadyForDownload(telegramId, limit, cutoffDateSeconds, downloadOldestFirst);
     }
     
     /**
@@ -47,8 +53,8 @@ public class DownloadQueueService {
      * @param downloadOldestFirst If true, order by message_id ASC (oldest first), else DESC (newest first). If null, defaults to true.
      * @return Number of files queued
      */
-    public static Future<Integer> queueFilesForDownload(long telegramId, long chatId, int limit, Integer cutoffDateSeconds, Boolean downloadOldestFirst) {
-        return DataVerticle.fileRepository.queueFilesForDownload(telegramId, chatId, limit, cutoffDateSeconds, downloadOldestFirst != null ? downloadOldestFirst : true);
+    public Future<Integer> queueFilesForDownload(long telegramId, long chatId, int limit, Integer cutoffDateSeconds, Boolean downloadOldestFirst) {
+        return context.fileRepository().queueFilesForDownload(telegramId, chatId, limit, cutoffDateSeconds, downloadOldestFirst != null ? downloadOldestFirst : true);
     }
     
     /**
@@ -58,8 +64,8 @@ public class DownloadQueueService {
      * @param telegramId Telegram account ID
      * @return Count of files with download_status='downloading'
      */
-    public static Future<Integer> getDownloadingCount(long telegramId) {
-        return DataVerticle.fileRepository.countByStatus(telegramId, FileRecord.DownloadStatus.downloading);
+    public Future<Integer> getDownloadingCount(long telegramId) {
+        return context.fileRepository().countByStatus(telegramId, FileRecord.DownloadStatus.downloading);
     }
     
     /**
@@ -69,7 +75,7 @@ public class DownloadQueueService {
      * @param maxConcurrent Maximum concurrent downloads allowed
      * @return List of FileRecord ready for download
      */
-    public static Future<List<FileRecord>> getFilesForDownload(long telegramId, int maxConcurrent) {
+    public Future<List<FileRecord>> getFilesForDownload(long telegramId, int maxConcurrent) {
         return getDownloadingCount(telegramId)
             .compose(downloadingCount -> {
                 int surplus = Math.max(0, maxConcurrent - downloadingCount);
