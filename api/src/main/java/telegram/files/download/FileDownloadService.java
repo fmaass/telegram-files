@@ -247,7 +247,7 @@ public class FileDownloadService {
                 });
     }
     
-    private Future<Void> syncFileDownloadStatus(TdApi.File file, TdApi.Message message, TdApi.MessageThreadInfo messageThreadInfo) {
+    public Future<Void> syncFileDownloadStatus(TdApi.File file, TdApi.Message message, TdApi.MessageThreadInfo messageThreadInfo) {
         return context.fileRepository()
                 .getByUniqueId(file.remote.uniqueId)
                 .compose(fileRecord -> {

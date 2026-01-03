@@ -841,86 +841,6 @@ public class TelegramVerticle extends AbstractVerticle {
         );
     }
 
-    private Future<Void> syncFileDownloadStatus(TdApi.File file, TdApi.Message message, TdApi.MessageThreadInfo messageThreadInfo) {
-        return DataVerticle.fileRepository
-                .getByUniqueId(file.remote.uniqueId)
-                .compose(fileRecord -> {
-                    if (fileRecord != null) {
-                        FileRecord finalFileRecord = fileRecord;
-                        // Use "downloaded" if setting enabled, otherwise "completed"
-                        FileRecord.DownloadStatus finalStatus = isTrackDownloadedStateEnabled() 
-                            ? FileRecord.DownloadStatus.downloaded 
-                            : FileRecord.DownloadStatus.completed;
-                        
-                        return DataVerticle.fileRepository.updateDownloadStatus(
-                                file.id,
-                                file.remote.uniqueId,
-                                file.local.path,
-                                finalStatus,
-                                System.currentTimeMillis()
-                        ).onSuccess(r -> {
-                            // Set file modification time to match original Telegram upload date
-                            if (file.local.path != null && finalFileRecord.date() > 0) {
-                                try {
-                                    Path filePath = Path.of(file.local.path);
-                                    if (Files.exists(filePath)) {
-                                        FileTime originalTime = FileTime.fromMillis(finalFileRecord.date() * 1000L);
-                                        Files.setLastModifiedTime(filePath, originalTime);
-                                        log.debug("Set file modification time for {} to {}", filePath.getFileName(), 
-                                                 DateUtil.date(finalFileRecord.date() * 1000L));
-                                    }
-                                } catch (Exception e) {
-                                    log.warn("Failed to set file modification time for {}: {}", 
-                                            file.local.path, e.getMessage());
-                                }
-                            }
-                        });
-                    }
-
-                    if (message == null) {
-                        return Future.failedFuture("File not found");
-                    }
-
-                    FileRecord newFileRecord = TdApiHelp.getFileHandler(message)
-                            .orElseThrow(() -> VertxException.noStackTrace("not support message type"))
-                            .convertFileRecord(telegramRecord.id())
-                            .withThreadInfo(messageThreadInfo);
-
-                    return DataVerticle.fileRepository.create(newFileRecord)
-                            .compose(r -> DataVerticle.fileRepository.updateDownloadStatus(
-                                    file.id,
-                                    file.remote.uniqueId,
-                                    file.local.path,
-                                    FileRecord.DownloadStatus.completed,
-                                    System.currentTimeMillis()
-                            ).onSuccess(updateResult -> {
-                                // Set file modification time to match original Telegram upload date
-                                if (file.local.path != null && newFileRecord.date() > 0) {
-                                    try {
-                                        Path filePath = Path.of(file.local.path);
-                                        if (Files.exists(filePath)) {
-                                            FileTime originalTime = FileTime.fromMillis(newFileRecord.date() * 1000L);
-                                            Files.setLastModifiedTime(filePath, originalTime);
-                                            log.debug("Set file modification time for {} to {}", filePath.getFileName(), 
-                                                     DateUtil.date(newFileRecord.date() * 1000L));
-                                        }
-                                    } catch (Exception e) {
-                                        log.warn("Failed to set file modification time for {}: {}", 
-                                                file.local.path, e.getMessage());
-                                    }
-                                }
-                            }));
-                })
-                .compose(r -> {
-                    sendFileStatusHttpEvent(file, r);
-                    if (r == null || r.isEmpty()) {
-                        return Future.failedFuture("File is downloaded completed, but update status failed");
-                    } else {
-                        return Future.failedFuture("File is already downloaded successfully");
-                    }
-                });
-    }
-    
     private void syncCompletedFilesStatus() {
         if (telegramRecord == null) {
             return;
@@ -1008,7 +928,7 @@ public class TelegramVerticle extends AbstractVerticle {
                                 .onSuccess(file -> {
                                     if (file != null && file.local != null && file.local.isDownloadingCompleted) {
                                         // File is actually completed - sync status
-                                        syncFileDownloadStatus(file, null, null)
+                                        downloadService.syncFileDownloadStatus(file, null, null)
                                                 .onSuccess(r -> {
                                                     synced.incrementAndGet();
                                                     checkSyncComplete(processed.incrementAndGet(), completedFiles.size(), synced.get(), notFound.get());
