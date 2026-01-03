@@ -73,6 +73,7 @@ public class AutoDownloadVerticle extends AbstractVerticle {
 
     private ServiceContext context;
     private DownloadQueueService queueService;
+    private HistoryDiscoveryService discoveryService;
 
     public AutoDownloadVerticle() {
         this.autoRecords = AutomationsHolder.INSTANCE.autoRecords();
@@ -85,6 +86,7 @@ public class AutoDownloadVerticle extends AbstractVerticle {
     public void start(Promise<Void> startPromise) {
         this.context = ServiceContext.fromDataVerticle();
         this.queueService = new DownloadQueueService(context);
+        this.discoveryService = new HistoryDiscoveryService(context);
         initAutoDownload()
                 .onFailure(err -> log.error("initAutoDownload() failed: %s".formatted(err.getMessage())))
                 .compose(v -> this.initEventConsumer())
@@ -106,7 +108,7 @@ public class AutoDownloadVerticle extends AbstractVerticle {
                                                 addCommentMessage(auto);
                                             } else {
                                                 if (auto.isNotComplete(AutomationState.HISTORY_DOWNLOAD_SCAN_COMPLETE)) {
-                                                    HistoryDiscoveryService.discoverHistory(auto,
+                                                    discoveryService.discoverHistory(auto,
                                                         result -> {
                                                             auto.download.nextFileType = result.nextFileType;
                                                             auto.download.nextFromMessageId = result.nextFromMessageId;
@@ -256,7 +258,7 @@ public class AutoDownloadVerticle extends AbstractVerticle {
             discoveryParams.sentinelMessageId = finalSentinelMessageId;
             discoveryParams.sentinelMessageDate = finalSentinelMessageDate;
             
-            HistoryDiscoveryService.discoverHistory(discoveryParams,
+            discoveryService.discoverHistory(discoveryParams,
                 result -> {
                     scanThread.nextFileType = result.nextFileType;
                     scanThread.nextFromMessageId = result.nextFromMessageId;
@@ -270,7 +272,7 @@ public class AutoDownloadVerticle extends AbstractVerticle {
     }
 
     /**
-     * @deprecated Replaced by HistoryDiscoveryService.discoverHistory()
+     * @deprecated Replaced by discoveryService.discoverHistory()
      */
     @Deprecated
     private void addHistoryMessage(SettingAutoRecords.Automation auto) {
@@ -316,7 +318,7 @@ public class AutoDownloadVerticle extends AbstractVerticle {
     }
 
     /**
-     * @deprecated Replaced by HistoryDiscoveryService.discoverHistory()
+     * @deprecated Replaced by discoveryService.discoverHistory()
      */
     @Deprecated
     private void addHistoryMessage(ScanParams params,
