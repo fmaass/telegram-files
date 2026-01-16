@@ -363,18 +363,16 @@ public class FileRepositoryImpl extends AbstractSqlRepository implements FileRep
 
     @Override
     public Future<JsonObject> getChatDownloadStatistics(long telegramId, long chatId, Integer historySince) {
-        // Build query with optional history cutoff filter
-        String query = historySince != null ? """
-                SELECT COUNT(*)                                                                     AS total,
-                       COUNT(CASE WHEN download_status = 'downloading' THEN 1 END)                  AS downloading,
-                       COUNT(CASE WHEN download_status = 'paused' THEN 1 END)                       AS paused,
-                       COUNT(CASE WHEN download_status = 'completed' OR download_status = 'downloaded' THEN 1 END) AS completed,
-                       COUNT(CASE WHEN download_status = 'error' THEN 1 END)                        AS error,
-                       COUNT(CASE WHEN download_status = 'idle' OR download_status = 'queued' THEN 1 END) AS idle
-                FROM file_record
-                WHERE telegram_id = #{telegramId} AND chat_id = #{chatId} AND type != 'thumbnail'
-                  AND date >= #{historySince}
-                """ : """
+        // Validate parameters
+        if (telegramId <= 0 || chatId == 0) {
+            return Future.failedFuture(new IllegalArgumentException("Invalid telegramId or chatId"));
+        }
+        if (historySince != null && historySince < 0) {
+            return Future.failedFuture(new IllegalArgumentException("historySince cannot be negative"));
+        }
+        
+        // Build query with optional history cutoff filter (DRY - no duplication)
+        String baseQuery = """
                 SELECT COUNT(*)                                                                     AS total,
                        COUNT(CASE WHEN download_status = 'downloading' THEN 1 END)                  AS downloading,
                        COUNT(CASE WHEN download_status = 'paused' THEN 1 END)                       AS paused,
@@ -384,6 +382,7 @@ public class FileRepositoryImpl extends AbstractSqlRepository implements FileRep
                 FROM file_record
                 WHERE telegram_id = #{telegramId} AND chat_id = #{chatId} AND type != 'thumbnail'
                 """;
+        String query = baseQuery + (historySince != null ? " AND date >= #{historySince}" : "");
         
         Map<String, Object> params = historySince != null ?
                 Map.of("telegramId", telegramId, "chatId", chatId, "historySince", historySince) :
@@ -805,7 +804,7 @@ public class FileRepositoryImpl extends AbstractSqlRepository implements FileRep
     }
     
     @Override
-    public Future<List<FileRecord>> getFilesReadyForDownload(long telegramId, int limit, Integer cutoffDateSeconds, Boolean downloadOldestFirst) {
+    public Future<List<FileRecord>> getFilesReadyForDownload(long telegramId, long chatId, int limit, Integer cutoffDateSeconds, Boolean downloadOldestFirst) {
         // Get automation settings to determine cutoff and ordering if not provided
         return DataVerticle.settingRepository.<SettingAutoRecords>getByKey(SettingKey.automation)
             .compose(autoRecords -> {
@@ -814,6 +813,7 @@ public class FileRepositoryImpl extends AbstractSqlRepository implements FileRep
                 if (resolvedDownloadOldestFirst == null && autoRecords != null && autoRecords.automations != null) {
                     for (SettingAutoRecords.Automation auto : autoRecords.automations) {
                         if (auto.telegramId == telegramId 
+                            && (chatId == 0 || auto.chatId == chatId)
                             && auto.download != null 
                             && auto.download.rule != null) {
                             resolvedDownloadOldestFirst = auto.download.rule.downloadOldestFirst;
@@ -827,6 +827,7 @@ public class FileRepositoryImpl extends AbstractSqlRepository implements FileRep
                 if (cutoffDateSeconds == null && autoRecords != null && autoRecords.automations != null) {
                     for (SettingAutoRecords.Automation auto : autoRecords.automations) {
                         if (auto.telegramId == telegramId 
+                            && (chatId == 0 || auto.chatId == chatId)
                             && auto.download != null 
                             && auto.download.rule != null 
                             && auto.download.rule.historySince != null 
@@ -838,18 +839,18 @@ public class FileRepositoryImpl extends AbstractSqlRepository implements FileRep
                                     new TdApi.GetChatMessageByDate(auto.chatId, auto.download.rule.historySince)
                                 ).compose(sentinelMessage -> {
                                     Integer resolvedCutoff = sentinelMessage != null ? sentinelMessage.date : null;
-                                    return queryFilesReadyForDownload(telegramId, limit, resolvedCutoff, finalDownloadOldestFirst);
+                                    return queryFilesReadyForDownload(telegramId, chatId, limit, resolvedCutoff, finalDownloadOldestFirst);
                                 });
                             }
                         }
                     }
                 }
                 
-                return queryFilesReadyForDownload(telegramId, limit, cutoffDateSeconds, finalDownloadOldestFirst);
+                return queryFilesReadyForDownload(telegramId, chatId, limit, cutoffDateSeconds, finalDownloadOldestFirst);
             });
     }
     
-    private Future<List<FileRecord>> queryFilesReadyForDownload(long telegramId, int limit, Integer cutoffDateSeconds, Boolean downloadOldestFirst) {
+    private Future<List<FileRecord>> queryFilesReadyForDownload(long telegramId, long chatId, int limit, Integer cutoffDateSeconds, Boolean downloadOldestFirst) {
         Map<String, Object> params = new HashMap<>();
         params.put("telegramId", telegramId);
         params.put("limit", limit);
@@ -861,6 +862,11 @@ public class FileRepositoryImpl extends AbstractSqlRepository implements FileRep
               AND (scan_state = 'idle' OR scan_state IS NULL)
               AND type != 'thumbnail'
             """);
+        
+        if (chatId != 0) {
+            queryBuilder.append("  AND chat_id = #{chatId}\n");
+            params.put("chatId", chatId);
+        }
         
         if (cutoffDateSeconds != null && cutoffDateSeconds > 0) {
             queryBuilder.append("  AND date >= #{cutoffDateSeconds}\n");

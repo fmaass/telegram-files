@@ -137,7 +137,7 @@ public class AutoDownloadVerticle extends AbstractVerticle {
                                     log.debug("No download-enabled automations found - skipping download loop.");
                                     return;
                                 }
-                                enabledItems.forEach(auto -> downloadFromDatabase(auto.telegramId));
+                                enabledItems.forEach(auto -> downloadFromDatabase(auto));
                             });
 
                     log.info("""
@@ -788,59 +788,36 @@ public class AutoDownloadVerticle extends AbstractVerticle {
      * Download files from database-driven queue.
      * Queries database for files ready to download and starts downloads.
      */
-    private void downloadFromDatabase(long telegramId) {
+    private void downloadFromDatabase(SettingAutoRecords.Automation automation) {
+        long telegramId = automation.telegramId;
         int queueLimit = limit > Integer.MAX_VALUE / 2 
             ? Integer.MAX_VALUE 
             : limit * 2;
-        // Get cutoff date from automation settings
-        SettingAutoRecords.Automation automation = autoRecords.getDownloadEnabledItems().stream()
-            .filter(auto -> auto.telegramId == telegramId)
-            .findFirst()
-            .orElse(null);
         
-        if (automation != null && automation.download != null && automation.download.rule != null 
+        if (automation.download != null && automation.download.rule != null 
             && automation.download.rule.historySince != null && automation.download.rule.historySince > 0) {
-            // Get sentinel message date for cutoff
-            Optional<TelegramVerticle> verticleOpt = TelegramVerticles.get(telegramId);
-            if (verticleOpt.isPresent()) {
-                verticleOpt.get().client.execute(
-                    new TdApi.GetChatMessageByDate(automation.chatId, automation.download.rule.historySince)
-                ).onSuccess(sentinelMessage -> {
-                    Integer cutoff = sentinelMessage != null ? sentinelMessage.date : null;
-                    queueAndDownload(telegramId, queueLimit, cutoff);
-                }).onFailure(err -> {
-                    log.warn("Failed to get sentinel message for cutoff, queueing without cutoff: %s".formatted(err.getMessage()));
-                    queueAndDownload(telegramId, queueLimit, null);
-                });
-                return;
-            } else {
-                log.warn("Telegram verticle not found for telegramId %d, queueing without cutoff".formatted(telegramId));
-            }
+            // Use historySince directly as cutoff (it's already a Unix timestamp in seconds)
+            queueAndDownload(telegramId, automation.chatId, queueLimit, automation.download.rule.historySince, automation.download.rule.downloadOldestFirst);
+            return;
         }
         
         // No cutoff date found, queue without filtering
-        queueAndDownload(telegramId, queueLimit, null);
+        Boolean downloadOldestFirst = automation.download != null && automation.download.rule != null
+            ? automation.download.rule.downloadOldestFirst : null;
+        queueAndDownload(telegramId, automation.chatId, queueLimit, null, downloadOldestFirst);
     }
     
-    private void queueAndDownload(long telegramId, int queueLimit, Integer cutoffDateSeconds) {
-        // Get downloadOldestFirst setting from automation
-        SettingAutoRecords.Automation automation = autoRecords.getDownloadEnabledItems().stream()
-            .filter(auto -> auto.telegramId == telegramId)
-            .findFirst()
-            .orElse(null);
-        Boolean downloadOldestFirst = automation != null && automation.download != null && automation.download.rule != null
-            ? automation.download.rule.downloadOldestFirst : null;
-        
-        DownloadQueueService.queueFilesForDownload(telegramId, 0, queueLimit, cutoffDateSeconds, downloadOldestFirst)
+    private void queueAndDownload(long telegramId, long chatId, int queueLimit, Integer cutoffDateSeconds, Boolean downloadOldestFirst) {
+        DownloadQueueService.queueFilesForDownload(telegramId, chatId, queueLimit, cutoffDateSeconds, downloadOldestFirst)
             .compose(queuedCount -> {
                 if (queuedCount > 0) {
-                    log.debug("Queued %d idle files for download. TelegramId: %d".formatted(queuedCount, telegramId));
+                    log.debug("Queued %d idle files for download. TelegramId: %d, ChatId: %d".formatted(queuedCount, telegramId, chatId));
                 }
                 // Then get files to download
-                return DownloadQueueService.getFilesForDownload(telegramId, limit);
+                return DownloadQueueService.getFilesForDownload(telegramId, chatId, limit, cutoffDateSeconds, downloadOldestFirst);
             })
             .onSuccess(files -> processDownloadFiles(telegramId, files))
-            .onFailure(err -> log.error("Failed to queue/get files for download from database: %s".formatted(err.getMessage())));
+            .onFailure(err -> log.error("Failed to queue/get files for download from database (telegramId=%d, chatId=%d): %s".formatted(telegramId, chatId, err.getMessage())));
     }
     
     private void processDownloadFiles(long telegramId, List<FileRecord> files) {

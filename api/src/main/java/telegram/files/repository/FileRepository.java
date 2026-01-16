@@ -65,10 +65,13 @@ public interface FileRepository {
      * Orders by download_priority DESC, queued_at ASC.
      * 
      * @param telegramId Telegram account ID
+     * @param chatId Chat ID (0 for all chats)
      * @param limit Maximum number of files to return
+     * @param cutoffDateSeconds Optional cutoff date in seconds. Only return files with date >= cutoffDate.
+     * @param downloadOldestFirst If true, order by date ASC (oldest first), else DESC (newest first).
      * @return List of FileRecord ready for download
      */
-    Future<List<FileRecord>> getFilesReadyForDownload(long telegramId, int limit, Integer cutoffDateSeconds, Boolean downloadOldestFirst);
+    Future<List<FileRecord>> getFilesReadyForDownload(long telegramId, long chatId, int limit, Integer cutoffDateSeconds, Boolean downloadOldestFirst);
     
     /**
      * Mark files as queued by setting queued_at timestamp.

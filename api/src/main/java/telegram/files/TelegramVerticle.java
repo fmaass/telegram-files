@@ -66,6 +66,11 @@ public class TelegramVerticle extends AbstractVerticle {
     private long lastFileEventTime;
 
     private long lastFileDownloadEventTime;
+    
+    // Cache for trackDownloadedState setting to avoid repeated DB queries
+    private volatile Boolean trackDownloadedStateCache = null;
+    private volatile long trackDownloadedStateCacheTime = 0;
+    private static final long CACHE_TTL_MS = 60000; // 1 minute
 
     public TelegramVerticle(String rootPath) {
         this.rootPath = rootPath;
@@ -772,9 +777,27 @@ public class TelegramVerticle extends AbstractVerticle {
         log.error(e);
     }
     
-    private boolean isTrackDownloadedStateEnabled() {
-        Boolean setting = Future.await(DataVerticle.settingRepository.<Boolean>getByKey(SettingKey.trackDownloadedState));
-        return setting != null && setting;
+    private Future<Boolean> isTrackDownloadedStateEnabled() {
+        // Check cache first
+        long now = System.currentTimeMillis();
+        if (trackDownloadedStateCache != null && (now - trackDownloadedStateCacheTime) < CACHE_TTL_MS) {
+            return Future.succeededFuture(trackDownloadedStateCache);
+        }
+        
+        // Cache miss - fetch from DB
+        return DataVerticle.settingRepository.<Boolean>getByKey(SettingKey.trackDownloadedState)
+                .map(setting -> {
+                    trackDownloadedStateCache = setting != null && setting;
+                    trackDownloadedStateCacheTime = now;
+                    return trackDownloadedStateCache;
+                })
+                .recover(err -> {
+                    log.warn("[{}] Failed to fetch trackDownloadedState setting, defaulting to false: {}", 
+                             getRootId(), err.getMessage());
+                    trackDownloadedStateCache = false;
+                    trackDownloadedStateCacheTime = now;
+                    return Future.succeededFuture(false);
+                });
     }
 
     private void handleSaveAvgSpeed() {
@@ -922,21 +945,22 @@ public class TelegramVerticle extends AbstractVerticle {
                             if (downloadStatus == null) {
                                 downloadStatus = FileRecord.DownloadStatus.idle;
                             }
-                            // Determine final status based on trackDownloadedState setting
-                            FileRecord.DownloadStatus finalStatus = downloadStatus;
-                            if (downloadStatus == FileRecord.DownloadStatus.completed && 
-                                finalLocalPath != null && 
-                                isTrackDownloadedStateEnabled()) {
-                                // When setting is enabled and file exists, use "downloaded" status
-                                finalStatus = FileRecord.DownloadStatus.downloaded;
+                            // Files downloaded to inbox are marked as 'completed'
+                            // External services (telegram-postproc) will update to 'processed' when moved
+                            Future<FileRecord.DownloadStatus> statusFuture;
+                            if (downloadStatus == null) {
+                                statusFuture = Future.succeededFuture(FileRecord.DownloadStatus.idle);
+                            } else {
+                                statusFuture = Future.succeededFuture(downloadStatus);
                             }
                             
-                            DataVerticle.fileRepository.updateDownloadStatus(file.id,
-                                            file.remote.uniqueId,
-                                            finalLocalPath,
-                                            finalStatus,
-                                            finalCompletionDate)
-                                    .onSuccess(r -> {
+                            statusFuture.compose(finalStatus -> 
+                                DataVerticle.fileRepository.updateDownloadStatus(file.id,
+                                                file.remote.uniqueId,
+                                                finalLocalPath,
+                                                finalStatus,
+                                                finalCompletionDate)
+                            ).onSuccess(r -> {
                                         sendFileStatusHttpEvent(file, r);
                                         
                                         // Set file modification time to match original Telegram upload date
@@ -993,10 +1017,9 @@ public class TelegramVerticle extends AbstractVerticle {
                 .compose(fileRecord -> {
                     if (fileRecord != null) {
                         FileRecord finalFileRecord = fileRecord;
-                        // Use "downloaded" if setting enabled, otherwise "completed"
-                        FileRecord.DownloadStatus finalStatus = isTrackDownloadedStateEnabled() 
-                            ? FileRecord.DownloadStatus.downloaded 
-                            : FileRecord.DownloadStatus.completed;
+                        // Files synced from Telegram are marked as 'completed'
+                        // External services will update to 'processed'/'imported' as needed
+                        FileRecord.DownloadStatus finalStatus = FileRecord.DownloadStatus.completed;
                         
                         return DataVerticle.fileRepository.updateDownloadStatus(
                                 file.id,

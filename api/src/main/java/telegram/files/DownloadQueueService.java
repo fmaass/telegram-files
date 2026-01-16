@@ -26,13 +26,20 @@ public class DownloadQueueService {
      * Files are ordered by priority (higher first) and queued_at (older first).
      * 
      * @param telegramId Telegram account ID
+     * @param chatId Chat ID (0 for all chats)
      * @param limit Maximum number of files to return
      * @param cutoffDateSeconds Optional cutoff date in seconds. Only return files with date >= cutoffDate.
-     * @param downloadOldestFirst If true, order by message_id ASC (oldest first), else DESC (newest first).
+     * @param downloadOldestFirst If true, order by date ASC (oldest first), else DESC (newest first).
      * @return List of FileRecord ready for download
      */
-    public static Future<List<FileRecord>> getFilesReadyForDownload(long telegramId, int limit, Integer cutoffDateSeconds, Boolean downloadOldestFirst) {
-        return DataVerticle.fileRepository.getFilesReadyForDownload(telegramId, limit, cutoffDateSeconds, downloadOldestFirst);
+    public static Future<List<FileRecord>> getFilesReadyForDownload(long telegramId, long chatId, int limit, Integer cutoffDateSeconds, Boolean downloadOldestFirst) {
+        if (telegramId <= 0) {
+            return Future.failedFuture(new IllegalArgumentException("telegramId must be positive, got: " + telegramId));
+        }
+        if (limit <= 0) {
+            return Future.failedFuture(new IllegalArgumentException("limit must be positive, got: " + limit));
+        }
+        return DataVerticle.fileRepository.getFilesReadyForDownload(telegramId, chatId, limit, cutoffDateSeconds, downloadOldestFirst);
     }
     
     /**
@@ -47,7 +54,13 @@ public class DownloadQueueService {
      * @return Number of files queued
      */
     public static Future<Integer> queueFilesForDownload(long telegramId, long chatId, int limit, Integer cutoffDateSeconds, Boolean downloadOldestFirst) {
-        return DataVerticle.fileRepository.queueFilesForDownload(telegramId, chatId, limit, cutoffDateSeconds, downloadOldestFirst != null ? downloadOldestFirst : true);
+        if (telegramId <= 0) {
+            return Future.failedFuture(new IllegalArgumentException("telegramId must be positive, got: " + telegramId));
+        }
+        if (limit <= 0) {
+            return Future.failedFuture(new IllegalArgumentException("limit must be positive, got: " + limit));
+        }
+        return DataVerticle.fileRepository.queueFilesForDownload(telegramId, chatId, limit, cutoffDateSeconds, downloadOldestFirst != null ? downloadOldestFirst : false);
     }
     
     /**
@@ -65,10 +78,13 @@ public class DownloadQueueService {
      * Get files ready for download, respecting the limit of concurrent downloads.
      * 
      * @param telegramId Telegram account ID
+     * @param chatId Chat ID (0 for all chats)
      * @param maxConcurrent Maximum concurrent downloads allowed
+     * @param cutoffDateSeconds Optional cutoff date in seconds. Only return files with date >= cutoffDate.
+     * @param downloadOldestFirst If true, order by date ASC (oldest first), else DESC (newest first).
      * @return List of FileRecord ready for download
      */
-    public static Future<List<FileRecord>> getFilesForDownload(long telegramId, int maxConcurrent) {
+    public static Future<List<FileRecord>> getFilesForDownload(long telegramId, long chatId, int maxConcurrent, Integer cutoffDateSeconds, Boolean downloadOldestFirst) {
         return getDownloadingCount(telegramId)
             .compose(downloadingCount -> {
                 int surplus = Math.max(0, maxConcurrent - downloadingCount);
@@ -79,9 +95,7 @@ public class DownloadQueueService {
                 }
                 
                 // Get files ready for download (already queued or need to be queued)
-                // Note: cutoffDateSeconds and downloadOldestFirst will be determined by the repository
-                // based on automation settings
-                return getFilesReadyForDownload(telegramId, surplus, null, null);
+                return getFilesReadyForDownload(telegramId, chatId, surplus, cutoffDateSeconds, downloadOldestFirst);
             });
     }
 }
