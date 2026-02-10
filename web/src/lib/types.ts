@@ -30,7 +30,8 @@ export type DownloadStatus =
   | "downloading"
   | "paused"
   | "completed"
-  | "downloaded"
+  | "processed"
+  | "imported"
   | "error";
 
 export type TransferStatus = "idle" | "transferring" | "completed" | "error";
@@ -121,6 +122,7 @@ export type FileFilter = {
   search: string;
   type: FileType | "all";
   downloadStatus?: DownloadStatus;
+  downloadStatuses?: DownloadStatus[]; // Multi-select status filter
   transferStatus?: TransferStatus;
   offline: boolean;
   tags: string[];
@@ -205,11 +207,11 @@ export type AutoDownloadRule = {
   downloadCommentFiles: boolean;
   filterExpr: string;
   /**
-   * Optional ISO-8601 timestamp (UTC) that bounds history backfill.
+   * Unix timestamp in seconds (UTC) that bounds history backfill.
    * If present, only messages sent on/after this date are considered.
    * If null/undefined, all history is considered (when downloadHistory is true).
    */
-  historySince?: string | null;
+  historySince?: number | null;
   /**
    * If true, download files from oldest to newest.
    * If false (default), download from newest to oldest.

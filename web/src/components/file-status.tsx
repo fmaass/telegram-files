@@ -6,9 +6,12 @@ import { TooltipWrapper } from "@/components/ui/tooltip";
 import { AnimatePresence, motion } from "framer-motion";
 import {
   CheckCircle2,
+  CircleHelp,
   Clock,
   Download,
   FolderSync,
+  Music,
+  Package,
   Pause,
   XCircle,
 } from "lucide-react";
@@ -35,10 +38,15 @@ export const DOWNLOAD_STATUS = {
     className: "bg-green-100 text-green-600",
     text: "Completed",
   },
-  downloaded: {
-    icon: CheckCircle2,
+  processed: {
+    icon: Package,
     className: "bg-purple-100 text-purple-600",
-    text: "Downloaded",
+    text: "Processed",
+  },
+  imported: {
+    icon: Music,
+    className: "bg-indigo-100 text-indigo-600",
+    text: "Imported",
   },
   error: {
     icon: XCircle,
@@ -46,6 +54,16 @@ export const DOWNLOAD_STATUS = {
     text: "Error",
   },
 };
+
+const DOWNLOAD_STATUS_FALLBACK = {
+  icon: CircleHelp,
+  className: "bg-gray-100 text-gray-500",
+  text: "Unknown",
+};
+
+export function getDownloadStatusConfig(status: string) {
+  return DOWNLOAD_STATUS[status as keyof typeof DOWNLOAD_STATUS] ?? DOWNLOAD_STATUS_FALLBACK;
+}
 
 export const TRANSFER_STATUS = {
   idle: {
@@ -105,11 +123,11 @@ export default function FileStatus({
               <Badge
                 className={cn(
                   "h-6 text-xs hover:bg-gray-200",
-                  DOWNLOAD_STATUS[file.downloadStatus].className,
+                  getDownloadStatusConfig(file.downloadStatus).className,
                   isMobile && "shadow-none",
                 )}
               >
-                {DOWNLOAD_STATUS[file.downloadStatus].text}
+                {getDownloadStatusConfig(file.downloadStatus).text}
               </Badge>
             </TooltipWrapper>
           </motion.div>

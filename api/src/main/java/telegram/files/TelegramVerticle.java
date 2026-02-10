@@ -370,9 +370,11 @@ public class TelegramVerticle extends AbstractVerticle {
                             })
                             .compose(record -> {
                                 // Check if we should start the download
-                                // Don't start if already downloading or completed
+                                // Don't start if already downloading, completed, processed, or imported
                                 if (record.isDownloadStatus(FileRecord.DownloadStatus.downloading) ||
-                                    record.isDownloadStatus(FileRecord.DownloadStatus.completed)) {
+                                    record.isDownloadStatus(FileRecord.DownloadStatus.completed) ||
+                                    record.isDownloadStatus(FileRecord.DownloadStatus.processed) ||
+                                    record.isDownloadStatus(FileRecord.DownloadStatus.imported)) {
                                     return Future.succeededFuture(record);
                                 }
                                 
@@ -401,6 +403,15 @@ public class TelegramVerticle extends AbstractVerticle {
                                                     ));
 
                                                     downloadThumbnail(chatId, messageId, fileHandler.convertThumbnailRecord(telegramRecord.id()));
+                                                })
+                                                .onFailure(err -> {
+                                                    // Rollback status to idle if TDLib rejected the download
+                                                    log.warn("[%s] AddFileToDownloads failed, rolling back to idle: %s (fileId=%d, uniqueId=%s)"
+                                                            .formatted(getRootId(), err.getMessage(), fileId, updatedRecord.uniqueId()));
+                                                    DataVerticle.fileRepository.updateDownloadStatus(
+                                                            updatedRecord.id(), updatedRecord.uniqueId(), null,
+                                                            FileRecord.DownloadStatus.idle, null
+                                                    );
                                                 })
                                                 .map(ignore -> updatedRecord));
                             });
@@ -897,9 +908,42 @@ public class TelegramVerticle extends AbstractVerticle {
                                             sendFileStatusHttpEvent(file, result);
                                             log.debug("[%s] Reconciliation fixed file status: %s".formatted(getRootId(), file.remote.uniqueId));
                                         });
+                                    } else if (file.local == null
+                                            || (!file.local.isDownloadingActive && !file.local.isDownloadingCompleted)) {
+                                        // Zombie: DB says 'downloading' but TDLib says not active and not completed.
+                                        // If queued > 2 min ago, mark as error to break retry cycles; otherwise reset to idle for one retry.
+                                        boolean staleZombie = fileRecord.queuedAt() != null
+                                                && (System.currentTimeMillis() - fileRecord.queuedAt()) > 120_000;
+                                        FileRecord.DownloadStatus targetStatus = staleZombie
+                                                ? FileRecord.DownloadStatus.error
+                                                : FileRecord.DownloadStatus.idle;
+                                        log.info("[%s] Reconciliation: Zombie download detected (%s), setting to %s: %s (dbId=%d)"
+                                                .formatted(getRootId(), staleZombie ? "stale" : "fresh", targetStatus, fileRecord.uniqueId(), fileRecord.id()));
+                                        reconciledCount[0]++;
+
+                                        DataVerticle.fileRepository.updateDownloadStatus(
+                                                fileRecord.id(),
+                                                fileRecord.uniqueId(),
+                                                null,
+                                                targetStatus,
+                                                null
+                                        );
                                     }
                                 })
-                                .onFailure(e -> log.trace("[%s] Failed to get file during reconciliation: %s - %s".formatted(getRootId(), fileRecord.uniqueId(), e.getMessage())));
+                                .onFailure(e -> {
+                                    // TDLib doesn't know this file ID — it's definitely a zombie, mark as error
+                                    log.info("[%s] Reconciliation: File ID unknown to TDLib, setting to error: %s (dbId=%d)"
+                                            .formatted(getRootId(), fileRecord.uniqueId(), fileRecord.id()));
+                                    reconciledCount[0]++;
+
+                                    DataVerticle.fileRepository.updateDownloadStatus(
+                                            fileRecord.id(),
+                                            fileRecord.uniqueId(),
+                                            null,
+                                            FileRecord.DownloadStatus.error,
+                                            null
+                                    );
+                                });
                     });
 
                     if (reconciledCount[0] > 0) {
@@ -998,6 +1042,14 @@ public class TelegramVerticle extends AbstractVerticle {
                         FileRecord.DownloadStatus downloadStatus = TdApiHelp.getDownloadStatus(file);
 
                         if (fileRecord != null) {
+                            // Never downgrade 'processed' or 'imported' status — these are set by
+                            // external services (telegram-postproc) after files are moved out of inbox.
+                            // After a container restart, tdlib reports these as 'idle' because its
+                            // local cache is gone, but the DB status is authoritative.
+                            if (fileRecord.isDownloadStatus(FileRecord.DownloadStatus.processed) ||
+                                fileRecord.isDownloadStatus(FileRecord.DownloadStatus.imported)) {
+                                return;
+                            }
                             if (fileRecord.isDownloadStatus(FileRecord.DownloadStatus.completed) &&
                                 fileRecord.isTransferStatus(FileRecord.TransferStatus.completed) &&
                                 FileUtil.exist(fileRecord.localPath())) {

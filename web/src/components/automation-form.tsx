@@ -334,11 +334,11 @@ function DownloadRule({ value, onChange }: DownloadRuleProps) {
                   id="history-since"
                   type="date"
                   className="ml-3 w-56 rounded-md border p-1 text-sm"
-                  value={value.historySince ? new Date(value.historySince).toISOString().slice(0,10) : ""}
+                  value={value.historySince ? new Date(value.historySince * 1000).toISOString().slice(0,10) : ""}
                   onChange={(e) =>
                     onChange({
                       ...value,
-                      historySince: e.target.value ? new Date(e.target.value + "T00:01:00Z").toISOString() : null,
+                      historySince: e.target.value ? Math.floor(new Date(e.target.value + "T00:01:00Z").getTime() / 1000) : null,
                     })
                   }
                   disabled={!value.downloadHistory}

@@ -85,9 +85,12 @@ public class FileRepositoryImpl extends AbstractSqlRepository implements FileRep
 
     @Override
     public Future<Tuple3<List<FileRecord>, Long, Long>> getFiles(long chatId, Map<String, String> filter) {
+        log.trace("FileRepositoryImpl.getFiles received filter: %s".formatted(filter));
         String search = filter.get("search");
         String type = filter.get("type");
         String downloadStatus = filter.get("downloadStatus");
+        String downloadStatuses = filter.get("downloadStatuses"); // Multi-select statuses
+        log.trace("FileRepositoryImpl.getFiles extracted downloadStatuses: %s".formatted(downloadStatuses));
         String transferStatus = filter.get("transferStatus");
         List<String> tags = StrUtil.split(filter.get("tags"), ",");
         long messageThreadId = Convert.toLong(filter.get("messageThreadId"), 0L);
@@ -120,7 +123,23 @@ public class FileRepositoryImpl extends AbstractSqlRepository implements FileRep
                 params.put("type", type);
             }
         }
-        if (StrUtil.isNotBlank(downloadStatus)) {
+        // Handle multi-select download statuses (validated against enum to prevent SQL injection)
+        if (StrUtil.isNotBlank(downloadStatuses)) {
+            List<String> statusList = StrUtil.split(downloadStatuses, ",").stream()
+                    .map(String::trim)
+                    .filter(s -> {
+                        try { FileRecord.DownloadStatus.valueOf(s); return true; }
+                        catch (IllegalArgumentException e) { return false; }
+                    })
+                    .toList();
+            if (CollUtil.isNotEmpty(statusList)) {
+                String statusClause = statusList.stream()
+                        .map(s -> "'" + s + "'")
+                        .collect(Collectors.joining(", "));
+                whereClause += " AND download_status IN (%s)".formatted(statusClause);
+            }
+        } else if (StrUtil.isNotBlank(downloadStatus)) {
+            // Fallback to single status filter for backward compatibility
             whereClause += " AND download_status = #{downloadStatus}";
             params.put("downloadStatus", downloadStatus);
         }

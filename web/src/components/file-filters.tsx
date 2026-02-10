@@ -13,7 +13,6 @@ import {
   type FileFilter,
   type FileType,
   type SortFields,
-  type TransferStatus,
 } from "@/lib/types";
 import { Button } from "./ui/button";
 import {
@@ -44,7 +43,7 @@ import { RangeSlider } from "@/components/ui/slider";
 import { cn, split } from "@/lib/utils";
 import { Input } from "@/components/ui/input";
 import FileTypeFilter from "@/components/file-type-filter";
-import FileStatusFilter from "@/components/file-status-filter";
+import FileStatusMultiselect from "@/components/file-status-multiselect";
 import { Switch } from "@/components/ui/switch";
 import useIsMobile from "@/hooks/use-is-mobile";
 import { TagsSelector } from "@/components/ui/tags-selector";
@@ -402,14 +401,29 @@ export default function FileFilters({
     setLocalFilters((prev) => ({ ...prev, type }));
   };
 
-  const handleStatusChange = (
-    downloadStatus?: DownloadStatus,
-    transferStatus?: TransferStatus,
-  ) => {
+  const handleDownloadStatusesChange = (statuses: DownloadStatus[]) => {
+    const allStatuses: DownloadStatus[] = [
+      "idle",
+      "downloading",
+      "paused",
+      "completed",
+      "processed",
+      "imported",
+      "error",
+    ];
+    // If all statuses are selected, treat as "show all" (undefined = no filter)
+    // If empty array, also treat as "show all" (undefined = no filter)
+    // Otherwise, use the selected statuses
+    const downloadStatuses =
+      statuses.length === 0 ||
+      (statuses.length === allStatuses.length &&
+        allStatuses.every((s) => statuses.includes(s)))
+        ? undefined
+        : statuses;
     setLocalFilters((prev) => ({
       ...prev,
-      downloadStatus,
-      transferStatus,
+      downloadStatuses,
+      downloadStatus: undefined, // Clear single-select filter when using multi-select
     }));
   };
 
@@ -532,31 +546,17 @@ export default function FileFilters({
                   onChange={handleTypeChange}
                 />
 
-                {!localFilters.offline && (
-                  <div className="flex items-center justify-between rounded-md border bg-gray-100/50 px-2 py-3 dark:bg-gray-600/50">
-                    <Label htmlFor="notDownload">Filter Not Download</Label>
-                    <Switch
-                      id="notDownload"
-                      checked={localFilters.downloadStatus === "idle"}
-                      onCheckedChange={(checked) => {
-                        setLocalFilters((prev) => ({
-                          ...prev,
-                          downloadStatus: checked ? "idle" : undefined,
-                        }));
-                      }}
-                      aria-label="Not Download"
-                    />
-                  </div>
-                )}
+                <FileStatusMultiselect
+                  selectedStatuses={
+                    localFilters.downloadStatuses === undefined
+                      ? (["idle", "downloading", "paused", "completed", "processed", "imported", "error"] as DownloadStatus[])
+                      : localFilters.downloadStatuses
+                  }
+                  onChange={handleDownloadStatusesChange}
+                />
 
                 {localFilters.offline && (
                   <>
-                    <FileStatusFilter
-                      downloadStatus={localFilters.downloadStatus}
-                      transferStatus={localFilters.transferStatus}
-                      onChange={handleStatusChange}
-                    />
-
                     <TagsFilter
                       tags={localFilters.tags}
                       onChange={handleTagsChange}

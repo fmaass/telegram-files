@@ -428,7 +428,19 @@ public class HttpVerticle extends AbstractVerticle {
 
         Map<String, String> filter = new HashMap<>();
         ctx.request().params().forEach(filter::put);
+        // Also check queryParams() in case params() doesn't include query string params
+        ctx.queryParams().names().forEach(name -> {
+            if (!filter.containsKey(name)) {
+                filter.put(name, ctx.queryParams().get(name));
+            }
+        });
         filter.put("search", URLUtil.decode(filter.get("search")));
+        // URL decode downloadStatuses if present (may contain URL-encoded commas)
+        String downloadStatuses = filter.get("downloadStatuses");
+        if (StrUtil.isNotBlank(downloadStatuses)) {
+            filter.put("downloadStatuses", URLUtil.decode(downloadStatuses));
+        }
+        log.info("handleTelegramFiles filter params: %s downloadStatuses: %s".formatted(filter, downloadStatuses));
 
         telegramVerticle.getChatFiles(Convert.toLong(chatId), filter)
                 .onSuccess(ctx::json)
@@ -1018,6 +1030,11 @@ public class HttpVerticle extends AbstractVerticle {
         Map<String, String> filter = new HashMap<>();
         ctx.request().params().forEach(filter::put);
         filter.put("search", URLUtil.decode(filter.get("search")));
+        // URL decode downloadStatuses if present (may contain URL-encoded commas)
+        String downloadStatuses = filter.get("downloadStatuses");
+        if (StrUtil.isNotBlank(downloadStatuses)) {
+            filter.put("downloadStatuses", URLUtil.decode(downloadStatuses));
+        }
 
         FileRecordRetriever.getFiles(0, filter)
                 .onSuccess(ctx::json)

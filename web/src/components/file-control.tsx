@@ -188,7 +188,8 @@ export default function FileControl({
       },
     ],
     completed: [removeBtnProps],
-    downloaded: [removeBtnProps],
+    processed: [removeBtnProps],
+    imported: [removeBtnProps],
   };
 
   const actionButtons = file.originalDeleted ? (
@@ -315,7 +316,9 @@ export function MobileFileControl({ file }: { file: TelegramFile }) {
           </Button>
         </>
       )}
-      {file.downloadStatus === "completed" && (
+      {(file.downloadStatus === "completed" ||
+        file.downloadStatus === "processed" ||
+        file.downloadStatus === "imported") && (
         <Button
           variant="outline"
           className="w-full"

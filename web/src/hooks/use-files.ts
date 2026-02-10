@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   type DownloadStatus,
   type FileFilter,
@@ -57,15 +57,24 @@ export function useFiles(
     "telegramFileListFilter",
     { ...DEFAULT_FILTERS, offline: noAccountSpecified },
   );
+  const filtersRef = useRef(filters);
+  const isFilterChangingRef = useRef(false);
   const getKey = (page: number, previousPageData: FileResponse) => {
+    // When filtering by download status, we need offline=true to use database filter
+    const hasDownloadStatusFilter = (filters.downloadStatuses && filters.downloadStatuses.length > 0) || filters.downloadStatus;
     const params = new URLSearchParams({
       ...(filters.search && {
         search: window.encodeURIComponent(filters.search),
       }),
       ...(filters.type && { type: filters.type }),
-      ...(filters.downloadStatus && { downloadStatus: filters.downloadStatus }),
+      // Use multi-select downloadStatuses if available, otherwise fall back to single downloadStatus
+      ...(filters.downloadStatuses && filters.downloadStatuses.length > 0 && {
+        downloadStatuses: filters.downloadStatuses.join(","),
+      }),
+      ...(filters.downloadStatus && !filters.downloadStatuses && { downloadStatus: filters.downloadStatus }),
       ...(filters.transferStatus && { transferStatus: filters.transferStatus }),
-      ...(filters.offline && { offline: "true" }),
+      // Automatically set offline=true when filtering by download status, or use explicit offline filter
+      ...((hasDownloadStatusFilter || filters.offline) && { offline: "true" }),
       ...(filters.tags.length > 0 && {
         tags: filters.tags.join(","),
       }),
@@ -181,6 +190,19 @@ export function useFiles(
     }
   }, [filters.offline, noAccountSpecified, setFilters]);
 
+  // Watch for filter changes and trigger refetch
+  useEffect(() => {
+    // Only refetch if filters actually changed (not just initial mount)
+    if (isFilterChangingRef.current) {
+      isFilterChangingRef.current = false;
+      // Reset to page 1 and refetch with new filters
+      setSize(1).then(() => {
+        mutate();
+      });
+    }
+    filtersRef.current = filters;
+  }, [filters, mutate, setSize]);
+
   const files = useMemo(() => {
     if (!pages) return [];
     const files: TelegramFile[] = [];
@@ -238,17 +260,42 @@ export function useFiles(
   };
 
   const handleFilterChange = async (newFilters: FileFilter) => {
-    if (
-      Object.keys(newFilters).every(
-        (key) =>
-          newFilters[key as keyof FileFilter] ===
-          filters[key as keyof FileFilter],
-      )
-    ) {
+    // Deep comparison for arrays (downloadStatuses, tags)
+    const filtersEqual = Object.keys({ ...filters, ...newFilters }).every((key) => {
+      const newValue = newFilters[key as keyof FileFilter];
+      const oldValue = filters[key as keyof FileFilter];
+      
+      // Handle array comparison
+      if (Array.isArray(newValue) && Array.isArray(oldValue)) {
+        if (newValue.length !== oldValue.length) return false;
+        return newValue.every((val, idx) => val === oldValue[idx]);
+      }
+      
+      // If one is array and other is not, they're different
+      if (Array.isArray(newValue) !== Array.isArray(oldValue)) {
+        return false;
+      }
+      
+      // Handle undefined comparison (both undefined means equal)
+      if (newValue === undefined && oldValue === undefined) return true;
+      
+      // Handle empty array comparison (both empty arrays mean equal)
+      if (Array.isArray(newValue) && Array.isArray(oldValue)) {
+        if (newValue.length === 0 && oldValue.length === 0) return true;
+      }
+      
+      return newValue === oldValue;
+    });
+    
+    if (filtersEqual) {
       return;
     }
+    
+    // Mark that we're changing filters
+    isFilterChangingRef.current = true;
+    
+    // Update filters - useEffect will handle the refetch after state updates
     setFilters(newFilters);
-    await setSize(1);
   };
 
   const updateField = async (

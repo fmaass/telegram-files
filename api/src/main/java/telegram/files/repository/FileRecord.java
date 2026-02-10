@@ -205,14 +205,29 @@ public record FileRecord(int id, //file id will change
         if (status == null && downloadStatus == null) {
             return true;
         }
-        return downloadStatus != null && DownloadStatus.valueOf(downloadStatus) == status;
+        if (downloadStatus == null) {
+            return false;
+        }
+        try {
+            return DownloadStatus.valueOf(downloadStatus) == status;
+        } catch (IllegalArgumentException e) {
+            // Legacy/unknown status in DB (e.g. "downloaded") — cannot match any enum value
+            return false;
+        }
     }
 
     public boolean isTransferStatus(TransferStatus status) {
         if (status == null && transferStatus == null) {
             return true;
         }
-        return transferStatus != null && TransferStatus.valueOf(transferStatus) == status;
+        if (transferStatus == null) {
+            return false;
+        }
+        try {
+            return TransferStatus.valueOf(transferStatus) == status;
+        } catch (IllegalArgumentException e) {
+            return false;
+        }
     }
 }
 
