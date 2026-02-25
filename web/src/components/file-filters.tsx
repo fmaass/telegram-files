@@ -387,6 +387,7 @@ export default function FileFilters({
   const filterCount = Object.entries(filters).filter(([key, value]) => {
     if (["offline", "sort", "order", "dateType", "sizeUnit"].includes(key))
       return false;
+    if (key === "showMissingOriginal") return value === false;
     if (typeof value === "string") return value !== "";
     if (typeof value === "boolean") return value;
     if (Array.isArray(value)) return value.length > 0;
@@ -425,6 +426,10 @@ export default function FileFilters({
       downloadStatuses,
       downloadStatus: undefined, // Clear single-select filter when using multi-select
     }));
+  };
+
+  const handleShowMissingOriginalChange = (checked: boolean) => {
+    setLocalFilters((prev) => ({ ...prev, showMissingOriginal: checked ? undefined : false }));
   };
 
   const handleTagsChange = (tags: string[]) => {
@@ -545,6 +550,21 @@ export default function FileFilters({
                   type={filters.type}
                   onChange={handleTypeChange}
                 />
+
+                <div className="flex items-center justify-between">
+                  <Label
+                    htmlFor="showMissingOriginal"
+                    className="cursor-pointer text-sm text-zinc-600 dark:text-zinc-400"
+                    title="Include files whose original Telegram message has been deleted"
+                  >
+                    Show missing messages
+                  </Label>
+                  <Switch
+                    id="showMissingOriginal"
+                    checked={localFilters.showMissingOriginal !== false}
+                    onCheckedChange={handleShowMissingOriginalChange}
+                  />
+                </div>
 
                 <FileStatusMultiselect
                   selectedStatuses={

@@ -211,6 +211,9 @@ export function useFiles(
         if (file.originalDeleted && latestFilesStatus[file.uniqueId]?.removed) {
           return;
         }
+        if (filters.showMissingOriginal === false && file.originalDeleted) {
+          return;
+        }
         files.push({
           ...file,
           id: latestFilesStatus[file.uniqueId]?.fileId ?? file.id,

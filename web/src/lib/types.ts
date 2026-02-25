@@ -125,6 +125,7 @@ export type FileFilter = {
   downloadStatuses?: DownloadStatus[]; // Multi-select status filter
   transferStatus?: TransferStatus;
   offline: boolean;
+  showMissingOriginal?: boolean;
   tags: string[];
   dateType?: "sent" | "downloaded";
   dateRange?: [string, string];
