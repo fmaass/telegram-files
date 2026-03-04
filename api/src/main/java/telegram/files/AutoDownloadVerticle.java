@@ -829,40 +829,45 @@ public class AutoDownloadVerticle extends AbstractVerticle {
         TelegramVerticle telegramVerticle = TelegramVerticles.getOrElseThrow(telegramId);
         
         List<Future<FileRecord>> downloadFutures = files.stream()
-            .map(fileRecord -> {
-                // Get the Telegram file ID from the message first
-                // startDownload expects the Telegram file ID, not the database record ID
-                return telegramVerticle.client.execute(new TdApi.GetMessage(fileRecord.chatId(), fileRecord.messageId()))
+            .map(fileRecord -> telegramVerticle.fetchMessage(fileRecord.chatId(), fileRecord.messageId())
                     .compose(message -> {
                         Optional<TdApiHelp.FileHandler<?>> handlerOpt = TdApiHelp.getFileHandler(message);
                         if (handlerOpt.isEmpty()) {
-                            log.warn("Cannot get file handler for message %d in chat %d".formatted(fileRecord.messageId(), fileRecord.chatId()));
+                            log.warn("Cannot get file handler for message %d in chat %d"
+                                    .formatted(fileRecord.messageId(), fileRecord.chatId()));
                             return Future.failedFuture("No file handler for message");
                         }
-                        TdApiHelp.FileHandler<?> handler = handlerOpt.get();
-                        Integer telegramFileId = handler.getFileId();
-                        log.debug("Start download file from database: DB ID=%d, Telegram File ID=%d, Message ID=%d".formatted(fileRecord.id(), telegramFileId, fileRecord.messageId()));
+                        Integer telegramFileId = handlerOpt.get().getFileId();
+                        log.debug("Start download: DB ID=%d, FileID=%d, MsgID=%d"
+                                .formatted(fileRecord.id(), telegramFileId, fileRecord.messageId()));
                         return telegramVerticle.startDownload(fileRecord.chatId(), fileRecord.messageId(), telegramFileId);
                     })
                     .onSuccess(updatedRecord -> {
-                        log.debug("Start download file success! ChatId: %d MessageId:%d"
-                            .formatted(fileRecord.chatId(), fileRecord.messageId()));
+                        log.debug("Download started: ChatId=%d MsgId=%d"
+                                .formatted(fileRecord.chatId(), fileRecord.messageId()));
                         if (updatedRecord.threadChatId() != 0
-                            && updatedRecord.messageThreadId() != 0
-                            && updatedRecord.threadChatId() != updatedRecord.chatId()) {
+                                && updatedRecord.messageThreadId() != 0
+                                && updatedRecord.threadChatId() != updatedRecord.chatId()) {
                             waitingScanThreads.computeIfAbsent(telegramId, k -> new LinkedList<>())
-                                .add(new WaitingScanThread(telegramId, updatedRecord.threadChatId(), updatedRecord.messageThreadId()));
+                                    .add(new WaitingScanThread(telegramId, updatedRecord.threadChatId(), updatedRecord.messageThreadId()));
                         }
                     })
-                    .onFailure(e -> log.error("Download file failed! ChatId: %d MessageId:%d DB ID:%d"
-                        .formatted(fileRecord.chatId(), fileRecord.messageId(), fileRecord.id()), e));
-            })
+                    .onFailure(e -> {
+                        if (e instanceof TelegramRunException tre && tre.getError().code == 404) {
+                            log.warn("Message deleted, marking as error: DB ID=%d, ChatId=%d, MsgId=%d"
+                                    .formatted(fileRecord.id(), fileRecord.chatId(), fileRecord.messageId()));
+                            DataVerticle.fileRepository.updateDownloadStatus(
+                                    fileRecord.id(), fileRecord.uniqueId(), null,
+                                    FileRecord.DownloadStatus.error, null);
+                        } else {
+                            log.error("Download failed: ChatId=%d MsgId=%d DB ID=%d — %s"
+                                    .formatted(fileRecord.chatId(), fileRecord.messageId(), fileRecord.id(), e.getMessage()));
+                        }
+                    }))
             .toList();
         
         Future.all(downloadFutures)
-            .onSuccess(results -> {
-                log.debug("Started %d downloads. TelegramId: %d".formatted(files.size(), telegramId));
-            })
+            .onSuccess(results -> log.debug("Started %d downloads. TelegramId: %d".formatted(files.size(), telegramId)))
             .onFailure(err -> log.error("Failed to start some downloads: %s".formatted(err.getMessage())));
     }
 

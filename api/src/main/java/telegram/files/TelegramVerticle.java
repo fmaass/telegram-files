@@ -314,10 +314,41 @@ public class TelegramVerticle extends AbstractVerticle {
                 });
     }
 
+    /**
+     * Fetch a message by ID, with automatic server fallback.
+     * <p>
+     * TDLib's getMessage() only returns messages from the local cache, which is
+     * empty after a restart. This method falls back to getChatHistory() to fetch
+     * the message from the Telegram server when the local cache misses.
+     *
+     * @return the message, or a failed future with 404 if the message was deleted
+     */
+    public Future<TdApi.Message> fetchMessage(long chatId, long messageId) {
+        return client.execute(new TdApi.GetMessage(chatId, messageId))
+                .recover(err -> {
+                    if (!(err instanceof TelegramRunException tre) || tre.getError().code != 404) {
+                        return Future.failedFuture(err);
+                    }
+                    // Not in local cache — fetch from server via getChatHistory.
+                    // getChatHistory returns messages with id < fromMessageId,
+                    // so we use messageId + 1 to include the target message.
+                    return client.execute(new TdApi.GetChatHistory(chatId, messageId + 1, 0, 1, false))
+                            .compose(history -> {
+                                if (history.messages != null && history.messages.length > 0
+                                        && history.messages[0].id == messageId) {
+                                    return Future.succeededFuture(history.messages[0]);
+                                }
+                                return Future.failedFuture(new TelegramRunException(
+                                        new TdApi.Error(404, "Message %d not found in chat %d (deleted from channel)"
+                                                .formatted(messageId, chatId))));
+                            });
+                });
+    }
+
     public Future<FileRecord> startDownload(Long chatId, Long messageId, Integer fileId) {
         return Future.all(
                         client.execute(new TdApi.GetFile(fileId)),
-                        client.execute(new TdApi.GetMessage(chatId, messageId)),
+                        fetchMessage(chatId, messageId),
                         client.execute(new TdApi.GetMessageThread(chatId, messageId), true)
                 )
                 .compose(results -> {
@@ -405,12 +436,18 @@ public class TelegramVerticle extends AbstractVerticle {
                                                     downloadThumbnail(chatId, messageId, fileHandler.convertThumbnailRecord(telegramRecord.id()));
                                                 })
                                                 .onFailure(err -> {
-                                                    // Rollback status to idle if TDLib rejected the download
-                                                    log.warn("[%s] AddFileToDownloads failed, rolling back to idle: %s (fileId=%d, uniqueId=%s)"
-                                                            .formatted(getRootId(), err.getMessage(), fileId, updatedRecord.uniqueId()));
+                                                    FileRecord.DownloadStatus rollbackStatus = FileRecord.DownloadStatus.idle;
+                                                    if (err instanceof TelegramRunException tre && tre.getError().code == 404) {
+                                                        rollbackStatus = FileRecord.DownloadStatus.error;
+                                                        log.warn("[%s] AddFileToDownloads got 404 (file unavailable), marking as error: fileId=%d, uniqueId=%s"
+                                                                .formatted(getRootId(), fileId, updatedRecord.uniqueId()));
+                                                    } else {
+                                                        log.warn("[%s] AddFileToDownloads failed, rolling back to idle: %s (fileId=%d, uniqueId=%s)"
+                                                                .formatted(getRootId(), err.getMessage(), fileId, updatedRecord.uniqueId()));
+                                                    }
                                                     DataVerticle.fileRepository.updateDownloadStatus(
                                                             updatedRecord.id(), updatedRecord.uniqueId(), null,
-                                                            FileRecord.DownloadStatus.idle, null
+                                                            rollbackStatus, null
                                                     );
                                                 })
                                                 .map(ignore -> updatedRecord));
