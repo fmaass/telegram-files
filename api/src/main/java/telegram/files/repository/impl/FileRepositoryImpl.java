@@ -77,6 +77,24 @@ public class FileRepositoryImpl extends AbstractSqlRepository implements FileRep
         return this.getByUniqueId(fileRecord.uniqueId())
                 .compose(record -> {
                     if (record != null) {
+                        // Backfill thread info if existing row has 0 but new record has it
+                        if (record.messageThreadId() == 0 && fileRecord.messageThreadId() != 0) {
+                            return SqlTemplate
+                                    .forUpdate(sqlClient, """
+                                            UPDATE file_record
+                                            SET message_thread_id = #{messageThreadId},
+                                                thread_chat_id = #{threadChatId}
+                                            WHERE unique_id = #{uniqueId}
+                                              AND message_thread_id = 0
+                                            """)
+                                    .execute(MapUtil.ofEntries(
+                                            MapUtil.entry("uniqueId", record.uniqueId()),
+                                            MapUtil.entry("messageThreadId", fileRecord.messageThreadId()),
+                                            MapUtil.entry("threadChatId", fileRecord.threadChatId())
+                                    ))
+                                    .map(false)
+                                    .onFailure(err -> log.error("Failed to backfill thread info: %s".formatted(err.getMessage())));
+                        }
                         return Future.succeededFuture(false);
                     }
                     return this.create(fileRecord).map(true);

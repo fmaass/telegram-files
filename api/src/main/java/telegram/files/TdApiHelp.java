@@ -225,6 +225,23 @@ public class TdApiHelp {
             this.content = (T) message.content;
         }
 
+        protected long getThreadChatId() {
+            if (message.topicId instanceof TdApi.MessageTopicForum
+                    || message.topicId instanceof TdApi.MessageTopicThread) {
+                return message.chatId;
+            }
+            return 0L;
+        }
+
+        protected long getMessageThreadId() {
+            if (message.topicId instanceof TdApi.MessageTopicForum forum) {
+                return (long) forum.forumTopicId * 1048576L;
+            } else if (message.topicId instanceof TdApi.MessageTopicThread thread) {
+                return thread.messageThreadId;
+            }
+            return 0L;
+        }
+
         public abstract Integer getFileId();
 
         public abstract String getFileUniqueId();
@@ -348,8 +365,8 @@ public class TdApiHelp {
                     System.currentTimeMillis(),
                     null,
                     null,
-                    0L,
-                    0L,
+                    getThreadChatId(),
+                    getMessageThreadId(),
                     getReactionCount(),
                     "idle", // scanState
                     0,      // downloadPriority
@@ -414,8 +431,8 @@ public class TdApiHelp {
                     System.currentTimeMillis(),
                     null,
                     null,
-                    0L,
-                    0L,
+                    getThreadChatId(),
+                    getMessageThreadId(),
                     getReactionCount(),
                     "idle", // scanState
                     0,      // downloadPriority
@@ -486,8 +503,8 @@ public class TdApiHelp {
                     System.currentTimeMillis(),
                     null,
                     null,
-                    0L,
-                    0L,
+                    getThreadChatId(),
+                    getMessageThreadId(),
                     getReactionCount(),
                     "idle", // scanState
                     0,      // downloadPriority
@@ -553,8 +570,8 @@ public class TdApiHelp {
                     System.currentTimeMillis(),
                     null,
                     null,
-                    0L,
-                    0L,
+                    getThreadChatId(),
+                    getMessageThreadId(),
                     getReactionCount(),
                     "idle", // scanState
                     0,      // downloadPriority
