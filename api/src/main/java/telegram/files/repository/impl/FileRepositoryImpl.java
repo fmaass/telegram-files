@@ -40,6 +40,13 @@ public class FileRepositoryImpl extends AbstractSqlRepository implements FileRep
 
     private static final Log log = LogFactory.get();
 
+    private static final Set<String> ALLOWED_SORT_COLUMNS = Set.of(
+            "id", "message_id", "date", "size", "file_name",
+            "completion_date", "download_status", "type", "reaction_count"
+    );
+
+    private static final Set<String> ALLOWED_ORDER_DIRECTIONS = Set.of("ASC", "DESC", "asc", "desc");
+
     public FileRepositoryImpl(SqlClient sqlClient) {
         super(sqlClient);
     }
@@ -118,6 +125,12 @@ public class FileRepositoryImpl extends AbstractSqlRepository implements FileRep
         String sizeUnit = filter.get("sizeUnit");
         String sort = filter.get("sort");
         String order = filter.get("order");
+        if (StrUtil.isNotBlank(sort) && !ALLOWED_SORT_COLUMNS.contains(sort)) {
+            sort = null;
+        }
+        if (StrUtil.isNotBlank(order) && !ALLOWED_ORDER_DIRECTIONS.contains(order.toUpperCase())) {
+            order = null;
+        }
 
         Long fromMessageId = Convert.toLong(filter.get("fromMessageId"), 0L);
         int limit = Convert.toInt(filter.get("limit"), 20);
@@ -166,11 +179,18 @@ public class FileRepositoryImpl extends AbstractSqlRepository implements FileRep
             params.put("transferStatus", transferStatus);
         }
         if (CollUtil.isNotEmpty(tags)) {
-            String tagClause = tags.stream()
-                    .filter(StrUtil::isNotBlank)
-                    .map(tag -> "tags LIKE '%%" + tag + "%%'")
-                    .collect(Collectors.joining(" OR "));
-            whereClause += " AND (%s)".formatted(tagClause);
+            List<String> tagConditions = new ArrayList<>();
+            for (int i = 0; i < tags.size(); i++) {
+                String tag = tags.get(i);
+                if (StrUtil.isNotBlank(tag)) {
+                    String paramName = "tag" + i;
+                    tagConditions.add("tags LIKE #{" + paramName + "}");
+                    params.put(paramName, "%%" + tag + "%%");
+                }
+            }
+            if (!tagConditions.isEmpty()) {
+                whereClause += " AND (" + String.join(" OR ", tagConditions) + ")";
+            }
         }
         if (messageThreadId != 0) {
             whereClause += " AND message_thread_id = #{messageThreadId}";
@@ -220,11 +240,11 @@ public class FileRepositoryImpl extends AbstractSqlRepository implements FileRep
             params.put("fromMessageId", fromMessageId);
             if (customSort) {
                 long fromSortField = Convert.toLong(filter.get("fromSortField"));
-                whereClause += " AND (%s %s %s OR (%s = %s AND message_id < #{fromMessageId}))".formatted(sort,
-                        Objects.equals(order, "asc") ? ">" : "<",
-                        fromSortField,
+                params.put("fromSortField", fromSortField);
+                whereClause += " AND (%s %s #{fromSortField} OR (%s = #{fromSortField} AND message_id < #{fromMessageId}))".formatted(
                         sort,
-                        fromSortField);
+                        Objects.equals(order.toLowerCase(), "asc") ? ">" : "<",
+                        sort);
             } else {
                 whereClause += " AND message_id < #{fromMessageId}";
             }

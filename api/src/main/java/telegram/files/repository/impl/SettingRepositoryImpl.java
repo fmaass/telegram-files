@@ -53,8 +53,15 @@ public class SettingRepositoryImpl extends AbstractSqlRepository implements Sett
         String keyStr = keys.stream()
                 .filter(StrUtil::isNotBlank)
                 .distinct()
+                .filter(key -> {
+                    try { SettingKey.valueOf(key); return true; }
+                    catch (IllegalArgumentException e) { return false; }
+                })
                 .map(key -> StrUtil.wrap(key, "'"))
                 .collect(Collectors.joining(","));
+        if (StrUtil.isBlank(keyStr)) {
+            return Future.succeededFuture(List.of());
+        }
 
         return SqlTemplate
                 .forQuery(sqlClient, """

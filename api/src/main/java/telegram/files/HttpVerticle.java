@@ -113,6 +113,7 @@ public class HttpVerticle extends AbstractVerticle {
         SessionStore sessionStore = LocalSessionStore.create(vertx, SESSION_COOKIE_NAME);
         SessionHandler sessionHandler = SessionHandler.create(sessionStore)
                 .setSessionCookieName(SESSION_COOKIE_NAME);
+        sessionHandler.setCookieHttpOnlyFlag(true);
         if (Config.isProd()) {
             sessionHandler
                     .setCookieSameSite(CookieSameSite.STRICT);
@@ -203,7 +204,7 @@ public class HttpVerticle extends AbstractVerticle {
                     HttpServerResponse response = ctx.response();
                     response.setStatusCode(statusCode)
                             .putHeader("Content-Type", "application/json")
-                            .end(JsonObject.of("error", throwable == null ? "☹️Sorry! Not today." : throwable.getMessage()).encode());
+                            .end(JsonObject.of("error", "Internal server error").encode());
                 });
         return router;
     }

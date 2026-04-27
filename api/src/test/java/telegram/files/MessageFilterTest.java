@@ -121,4 +121,47 @@ class MessageFilterTest {
 
         assertEquals(0, filtered.size(), "No messages should be returned for malicious expressions");
     }
+
+    // Security regression tests for issue jarvis2f/telegram-files#130
+    // These test that the JEXL sandbox properly blocks RCE vectors
+
+    @Test
+    void testSecurityBlocksRuntimeUtil() {
+        // PoC from upstream issue #130: RuntimeUtil allows arbitrary command execution
+        String expr = "new('cn.hutool.core.util.RuntimeUtil').execForStr('id')";
+        List<TdApi.Message> filtered = MessageFilter.filter(messages, expr);
+        assertEquals(0, filtered.size(), "RuntimeUtil must be blocked by JEXL sandbox");
+    }
+
+    @Test
+    void testSecurityBlocksProcessBuilder() {
+        // ProcessBuilder is another RCE vector
+        String expr = "new('java.lang.ProcessBuilder')";
+        List<TdApi.Message> filtered = MessageFilter.filter(messages, expr);
+        assertEquals(0, filtered.size(), "ProcessBuilder must be blocked by JEXL sandbox");
+    }
+
+    @Test
+    void testSecurityBlocksRuntime() {
+        // Runtime via class reflection
+        String expr = "''.class.forName('java.lang.Runtime')";
+        List<TdApi.Message> filtered = MessageFilter.filter(messages, expr);
+        assertEquals(0, filtered.size(), "Runtime access must be blocked by JEXL sandbox");
+    }
+
+    @Test
+    void testSecurityBlocksSystemExit() {
+        // System.exit via new() constructor
+        String expr = "new('java.lang.System').exit(0)";
+        List<TdApi.Message> filtered = MessageFilter.filter(messages, expr);
+        assertEquals(0, filtered.size(), "System instantiation must be blocked");
+    }
+
+    @Test
+    void testInputValidationBlocksConstructorCalls() {
+        // Defense-in-depth: input validation should catch new() before JEXL sees it
+        String expr = "new('anything')";
+        List<TdApi.Message> filtered = MessageFilter.filter(messages, expr);
+        assertEquals(0, filtered.size(), "Expressions with new() must be rejected by input validation");
+    }
 }

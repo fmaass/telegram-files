@@ -12,6 +12,7 @@ import cn.hutool.log.LogFactory;
 import org.apache.commons.jexl3.JexlBuilder;
 import org.apache.commons.jexl3.JexlEngine;
 import org.apache.commons.jexl3.JexlExpression;
+import org.apache.commons.jexl3.JexlFeatures;
 import org.apache.commons.jexl3.MapContext;
 import org.apache.commons.jexl3.introspection.JexlPermissions;
 import org.drinkless.tdlib.TdApi;
@@ -95,11 +96,20 @@ public class MessageFilter {
 
     private static final Map<String, JexlExpression> EXPR_CACHE = new ConcurrentHashMap<>();
 
+    // Disable new() constructor calls to prevent RCE via RuntimeUtil, ProcessBuilder, etc.
+    // See upstream issue jarvis2f/telegram-files#130
+    private static final JexlFeatures JEXL_FEATURES = new JexlFeatures()
+            .newInstance(false);
+
     private static final JexlEngine JEXL_ENGINE = new JexlBuilder()
+            .features(JEXL_FEATURES)
             .strict(true)
             .silent(false)
             .permissions(JexlPermissions.RESTRICTED
-                    .compose("cn.hutool.core.*")
+                    .compose("cn.hutool.core.util.*",
+                             "cn.hutool.core.collection.*",
+                             "cn.hutool.core.net.*",
+                             "cn.hutool.core.date.*")
                     .compose("telegram.files.repository.*")
             )
             .namespaces(MapUtil.ofEntries(
@@ -121,7 +131,20 @@ public class MessageFilter {
             ))
             .create();
 
+    /**
+     * Validates that the expression does not contain constructor calls.
+     * Defense-in-depth check - JEXL_FEATURES.newInstance(false) already blocks new() at the engine level.
+     */
+    private static void validateExpression(String exprStr) {
+        if (exprStr != null && exprStr.contains("new(")) {
+            throw new IllegalArgumentException(
+                    "Filter expressions must not contain constructor calls: " + exprStr
+            );
+        }
+    }
+
     public static JexlExpression getExpression(String exprStr) {
+        validateExpression(exprStr);
         return EXPR_CACHE.computeIfAbsent(exprStr, JEXL_ENGINE::createExpression);
     }
 
@@ -136,7 +159,13 @@ public class MessageFilter {
         if (StrUtil.isBlank(exprStr)) {
             return _ -> true;
         }
-        JexlExpression expression = getExpression(exprStr);
+        JexlExpression expression;
+        try {
+            expression = getExpression(exprStr);
+        } catch (Exception e) {
+            log.warn("Invalid filter expression: {}, error: {}", exprStr, e.getMessage());
+            return _ -> false;
+        }
         return message -> {
             Map<String, Object> map = BeanUtil.beanToMap(message, new LinkedHashMap<>(16, 1), BEAN_TO_MAP_OPTIONS);
             TdApiHelp.getFileHandler(message).ifPresent(fileHandler -> {
