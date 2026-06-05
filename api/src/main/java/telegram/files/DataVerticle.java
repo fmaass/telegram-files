@@ -113,7 +113,7 @@ public class DataVerticle extends AbstractVerticle {
     private Pool buildSqlClient() {
         PoolOptions poolOptions = new PoolOptions()
                 .setShared(true)
-                .setMaxSize(8)
+                .setMaxSize(3)
                 .setName("pool-tf")
                 .setIdleTimeout(300000)
                 .setPoolCleanerPeriod(300000);
