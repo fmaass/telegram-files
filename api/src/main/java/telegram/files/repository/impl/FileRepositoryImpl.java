@@ -1022,4 +1022,27 @@ public class FileRepositoryImpl extends AbstractSqlRepository implements FileRep
             .onFailure(err -> log.error("Failed to queue files for download: %s".formatted(err.getMessage())))
             .map(SqlResult::rowCount);
     }
+
+    @Override
+    public Future<Integer> queueFilesByUniqueIds(List<String> uniqueIds) {
+        if (CollUtil.isEmpty(uniqueIds)) {
+            return Future.succeededFuture(0);
+        }
+        long queuedAt = System.currentTimeMillis();
+        String inClause = IntStream.range(0, uniqueIds.size())
+                .mapToObj(i -> "#{uid" + i + "}")
+                .collect(Collectors.joining(", "));
+        Map<String, Object> params = new HashMap<>();
+        params.put("queuedAt", queuedAt);
+        for (int i = 0; i < uniqueIds.size(); i++) {
+            params.put("uid" + i, uniqueIds.get(i));
+        }
+        String sql = """
+                UPDATE file_record SET queued_at = #{queuedAt}
+                WHERE unique_id IN (%s) AND download_status = 'idle' AND queued_at IS NULL
+                """.formatted(inClause);
+        return SqlTemplate.forUpdate(sqlClient, sql)
+                .execute(params)
+                .map(SqlResult::rowCount);
+    }
 }
