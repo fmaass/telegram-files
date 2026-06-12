@@ -15,7 +15,7 @@ Java 23 / Vert.x 5 backend + Next.js React SPA, single Docker container.
 
 - Upstream: jarvis2f/telegram-files, remote name `upstream`
 - Forked at: v0.3.0 (commit 154fd6ae, Dec 26 2025)
-- Fork version: 0.3.1-fms (set in api/build.gradle, web/package.json, VERSION, Start.java)
+- Fork version: 0.4.0-fms (set in api/build.gradle, web/package.json, VERSION, Start.java)
 - Check upstream: `git fetch upstream && git log --oneline HEAD..upstream/main`
 - upstream/dev has commits that may overlap with features we implemented independently. Handle duplicates if upstream merges dev into main.
 
@@ -49,7 +49,11 @@ user `telegram_user`; reached from containers via host gateway). Credentials liv
 sidecar container has psql preconfigured for this DB. SQLite at APP_ROOT is the
 default for fresh installs and tests only. External services (tgfiles_postproc,
 telegram-health-monitor, telegram-monitor-dashboard) read AND write `file_record`
-directly -- schema changes must keep that interface stable.
+directly -- schema changes must keep that interface stable. After any
+schema restructure (PK change, column rename/drop), grep ALL external SQL
+consumers (sidecar scripts in telegram-postproc compose, health monitor
+queries) and update their WHERE/JOIN clauses. Verify with a manual run of
+each consumer's query against the migrated schema.
 
 Migrations are Java-based: `MIGRATIONS` maps in the repository record classes
 (e.g. FileRecord), run by `Definition.migrate()`.
@@ -80,10 +84,10 @@ compose file. It includes sidecars (autoheal, cleanup, logger, postproc, health
 monitor, dashboard) that depend on this service and its DB schema.
 
     # Build image (tag must match the compose file's image reference)
-    docker build -t telegram-files:0.3.1-fms .
+    docker build -t telegram-files:0.4.0-fms .
 
     # Fresh-install smoke test first
-    misc/smoke-test.sh telegram-files:0.3.1-fms
+    misc/smoke-test.sh telegram-files:0.4.0-fms
 
     # Deploy (from the production stack directory)
     cd ~/projects/music-processor/telegram-postproc && docker compose up -d telegram_files
@@ -106,6 +110,8 @@ monitor, dashboard) that depend on this service and its DB schema.
 - **SQL string interpolation**: never interpolate user-controlled values into SQL via String.formatted() or concatenation. Use #{param} parameterized queries or validate against whitelists. The sort/order/tags parameters were vulnerable.
 - **No HTTP auth**: the API has zero authentication middleware. Security relies entirely on network-level access control (LAN only, no Traefik route). Do not assume any route is authenticated.
 - **JEXL constructor calls**: filter expressions must not contain `new()` constructor invocations. JexlFeatures blocks these at the engine level, and input validation rejects them before JEXL evaluation as defense-in-depth.
+- **Telegram ID ranges**: chat IDs for groups/supergroups/channels are large negative numbers (e.g. -1001359914106). Never validate chatId as positive-only. User IDs are positive; chat IDs can be either.
+- **Map.of() null keys**: `Map.of()` / `Map.copyOf()` throw NPE on `.get(null)` / `.containsKey(null)`. Always null-guard the key before calling these methods, or use `HashMap` when null keys are expected.
 
 ## Session Review
 
