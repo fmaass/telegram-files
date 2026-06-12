@@ -5,7 +5,6 @@ import cn.hutool.core.bean.copier.CopyOptions;
 import cn.hutool.core.collection.CollUtil;
 import cn.hutool.core.date.DateUtil;
 import cn.hutool.core.map.MapUtil;
-import cn.hutool.core.net.NetUtil;
 import cn.hutool.core.util.*;
 import cn.hutool.log.Log;
 import cn.hutool.log.LogFactory;
@@ -106,13 +105,9 @@ public class MessageFilter {
             .strict(true)
             .silent(false)
             .permissions(JexlPermissions.RESTRICTED
-                    // JEXL checks the DECLARING class of a method: StrUtil inherits most
-                    // methods from CharSequenceUtil (cn.hutool.core.text), so that package
-                    // must be permitted or str: calls fail silently.
                     .compose("cn.hutool.core.util.*",
                              "cn.hutool.core.text.*",
                              "cn.hutool.core.collection.*",
-                             "cn.hutool.core.net.*",
                              "cn.hutool.core.date.*")
                     .compose("telegram.files.repository.*")
             )
@@ -121,14 +116,10 @@ public class MessageFilter {
                     MapUtil.entry("array", ArrayUtil.class),
                     MapUtil.entry("coll", CollUtil.class),
                     MapUtil.entry("obj", ObjectUtil.class),
-                    MapUtil.entry("class", ClassUtil.class),
-                    MapUtil.entry("id", IdUtil.class),
                     MapUtil.entry("char", CharUtil.class),
                     MapUtil.entry("random", RandomUtil.class),
                     MapUtil.entry("escape", EscapeUtil.class),
                     MapUtil.entry("hex", HexUtil.class),
-                    MapUtil.entry("net", NetUtil.class),
-                    MapUtil.entry("zip", ZipUtil.class),
                     MapUtil.entry("date", DateUtil.class),
                     MapUtil.entry("re", ReUtil.class),
                     MapUtil.entry("num", NumberUtil.class)

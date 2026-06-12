@@ -40,12 +40,17 @@ public class FileRepositoryImpl extends AbstractSqlRepository implements FileRep
 
     private static final Log log = LogFactory.get();
 
-    private static final Set<String> ALLOWED_SORT_COLUMNS = Set.of(
-            "id", "message_id", "date", "size", "file_name",
-            "completion_date", "download_status", "type", "reaction_count"
+    private static final Map<String, String> SORT_COLUMN_MAP = Map.of(
+            "id", "id",
+            "message_id", "message_id",
+            "date", "date",
+            "size", "size",
+            "file_name", "file_name",
+            "completion_date", "completion_date",
+            "download_status", "download_status",
+            "type", "type",
+            "reaction_count", "reaction_count"
     );
-
-    private static final Set<String> ALLOWED_ORDER_DIRECTIONS = Set.of("ASC", "DESC", "asc", "desc");
 
     public FileRepositoryImpl(SqlClient sqlClient) {
         super(sqlClient);
@@ -125,14 +130,10 @@ public class FileRepositoryImpl extends AbstractSqlRepository implements FileRep
         String dateRange = filter.get("dateRange");
         String sizeRange = filter.get("sizeRange");
         String sizeUnit = filter.get("sizeUnit");
-        String sort = filter.get("sort");
-        String order = filter.get("order");
-        if (StrUtil.isNotBlank(sort) && !ALLOWED_SORT_COLUMNS.contains(sort)) {
-            sort = null;
-        }
-        if (StrUtil.isNotBlank(order) && !ALLOWED_ORDER_DIRECTIONS.contains(order.toUpperCase())) {
-            order = null;
-        }
+        String sortRaw = filter.get("sort");
+        String sortColumn = sortRaw != null ? SORT_COLUMN_MAP.get(sortRaw) : null;
+        String orderRaw = filter.get("order");
+        boolean ascending = orderRaw != null && orderRaw.equalsIgnoreCase("asc");
 
         Long fromMessageId = Convert.toLong(filter.get("fromMessageId"), 0L);
         int limit = Math.min(Math.max(Convert.toInt(filter.get("limit"), 20), 1), 1000);
@@ -228,12 +229,12 @@ public class FileRepositoryImpl extends AbstractSqlRepository implements FileRep
                 params.put("maxSize", maxSize);
             }
         }
+        String orderDir = ascending ? "ASC" : "DESC";
         String orderBy = "message_id DESC";
-        boolean customSort = StrUtil.isNotBlank(sort) && StrUtil.isNotBlank(order);
+        boolean customSort = sortColumn != null && orderRaw != null;
         if (customSort) {
-            orderBy = "%s %s".formatted(sort, order);
-            if (Objects.equals(sort, "completion_date")) {
-                // For completion_date, we need to ensure the date is in milliseconds
+            orderBy = "%s %s".formatted(sortColumn, orderDir);
+            if (Objects.equals(sortColumn, "completion_date")) {
                 whereClause += " AND completion_date IS NOT NULL";
             }
         }
@@ -243,10 +244,9 @@ public class FileRepositoryImpl extends AbstractSqlRepository implements FileRep
             if (customSort) {
                 long fromSortField = Convert.toLong(filter.get("fromSortField"));
                 params.put("fromSortField", fromSortField);
+                String cmp = ascending ? ">" : "<";
                 whereClause += " AND (%s %s #{fromSortField} OR (%s = #{fromSortField} AND message_id < #{fromMessageId}))".formatted(
-                        sort,
-                        Objects.equals(order.toLowerCase(), "asc") ? ">" : "<",
-                        sort);
+                        sortColumn, cmp, sortColumn);
             } else {
                 whereClause += " AND message_id < #{fromMessageId}";
             }

@@ -61,6 +61,15 @@ public class HttpVerticle extends AbstractVerticle {
     
     private static final int BATCH_SIZE = 10;
 
+    static final Set<String> ALLOWED_TDLIB_METHODS = Set.of(
+            "SetAuthenticationPhoneNumber",
+            "CheckAuthenticationCode",
+            "CheckAuthenticationPassword",
+            "RequestQrCodeAuthentication",
+            "GetMessageThread",
+            "ResetNetworkStatistics"
+    );
+
     private final List<String> unboundClients = new ArrayList<>();
 
     private final FileRouteHandler fileRouteHandler = new FileRouteHandler();
@@ -124,7 +133,7 @@ public class HttpVerticle extends AbstractVerticle {
         }
         router.route()
                 .handler(sessionHandler)
-                .handler(BodyHandler.create());
+                .handler(BodyHandler.create().setBodyLimit(1024 * 1024));
 
         if (!Config.isProd()) {
             router.route()
@@ -571,6 +580,12 @@ public class HttpVerticle extends AbstractVerticle {
         String method = ctx.pathParam("method");
         if (method == null) {
             ctx.fail(400);
+            return;
+        }
+        if (!ALLOWED_TDLIB_METHODS.contains(method)) {
+            log.warn("Rejected TDLib method call: %s".formatted(method));
+            ctx.response().setStatusCode(403)
+                    .end(JsonObject.of("error", "Method not allowed: " + method).encode());
             return;
         }
         TelegramVerticle telegramVerticle = getTelegramVerticleBySession(ctx);
