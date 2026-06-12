@@ -44,7 +44,24 @@ public record FileRecord(int id, //file id will change
 ) {
 
     public enum DownloadStatus {
-        idle, downloading, paused, completed, processed, imported, error
+        idle, downloading, paused, completed, processed, imported, error;
+
+        public boolean isTerminal() {
+            return this == completed || this == processed || this == imported || this == error;
+        }
+
+        public boolean canTransitionTo(DownloadStatus target) {
+            if (this == target) return true;
+            return switch (this) {
+                case idle -> target == downloading || target == error;
+                case downloading -> target == paused || target == completed || target == error || target == idle;
+                case paused -> target == downloading || target == idle || target == error;
+                case completed -> target == processed || target == error;
+                case processed -> target == imported;
+                case imported -> false;
+                case error -> target == idle || target == downloading;
+            };
+        }
     }
 
     public enum TransferStatus {
