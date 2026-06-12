@@ -83,12 +83,12 @@ public record FileRecord(int id, //file id will change
                 scan_state          VARCHAR(20) DEFAULT 'idle',
                 download_priority   INT DEFAULT 0,
                 queued_at           BIGINT,
-                PRIMARY KEY (id, unique_id)
+                PRIMARY KEY (unique_id)
             )
             """;
 
     public static final String[] INDEXES = new String[]{
-            "CREATE INDEX idx_file_record_unique_id ON file_record (unique_id)",
+            "CREATE INDEX idx_file_record_id ON file_record (id)",
             "CREATE INDEX idx_file_record_telegram_status ON file_record (telegram_id, download_status)",
             "CREATE INDEX idx_file_record_chat_msg ON file_record (chat_id, message_id)",
             "CREATE INDEX idx_file_record_queue ON file_record (chat_id, download_status, queued_at)",
@@ -123,7 +123,16 @@ public record FileRecord(int id, //file id will change
                     "ALTER TABLE file_record ADD COLUMN scan_state VARCHAR(20) DEFAULT 'idle';",
                     "ALTER TABLE file_record ADD COLUMN download_priority INT DEFAULT 0;",
                     "ALTER TABLE file_record ADD COLUMN queued_at BIGINT;",
-            })
+            }),
+            MapUtil.entry(new Version("0.3.3"), Config.isPostgres() ? new String[]{
+                    "ALTER TABLE file_record DROP CONSTRAINT file_record_pkey",
+                    "ALTER TABLE file_record ADD PRIMARY KEY (unique_id)",
+                    "CREATE INDEX idx_file_record_id ON file_record (id)",
+                    "DROP INDEX IF EXISTS idx_file_record_unique_id",
+            } : Config.isMysql() ? new String[]{
+                    "ALTER TABLE file_record DROP PRIMARY KEY, ADD PRIMARY KEY (unique_id)",
+                    "CREATE INDEX idx_file_record_id ON file_record (id)",
+            } : new String[]{})
     ));
 
     public static class FileRecordDefinition implements Definition {

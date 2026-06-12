@@ -5,7 +5,7 @@ plugins {
 }
 
 group = 'telegram.files'
-version = '0.3.2-fms'
+version = '0.3.3-fms'
 
 java {
     toolchain {

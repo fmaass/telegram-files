@@ -312,10 +312,10 @@ public class FileRepositoryImpl extends AbstractSqlRepository implements FileRep
     public Future<FileRecord> getByPrimaryKey(int fileId, String uniqueId) {
         return SqlTemplate
                 .forQuery(sqlClient, """
-                        SELECT * FROM file_record WHERE id = #{fileId} AND unique_id = #{uniqueId}
+                        SELECT * FROM file_record WHERE unique_id = #{uniqueId}
                         """)
                 .mapTo(FileRecord.ROW_MAPPER)
-                .execute(Map.of("fileId", fileId, "uniqueId", uniqueId))
+                .execute(Map.of("uniqueId", uniqueId))
                 .onFailure(err -> log.error("Failed to get file record: %s".formatted(err.getMessage()))
                 )
                 .map(rs -> rs.size() > 0 ? rs.iterator().next() : null);
