@@ -24,10 +24,10 @@ RUN apk add --no-cache binutils && \
         --strip-debug \
         --no-man-pages \
         --no-header-files \
-        --compress=2 && \
+        --compress=zip-6 && \
     apk del binutils
 
-FROM node:21-alpine AS web-builder
+FROM node:22-alpine AS web-builder
 
 WORKDIR /web
 
@@ -54,7 +54,7 @@ ENV JAVA_HOME=/jre \
 
 RUN addgroup -S tf && \
     adduser -S -G tf tf && \
-    apk add --no-cache nginx wget curl unzip tini su-exec gettext openssl3 libstdc++ gcompat libc6-compat && \
+    apk add --no-cache nginx wget curl tini su-exec gettext openssl3 libstdc++ gcompat libc6-compat && \
     rm -rf /tmp/* /var/tmp/* && \
     touch /run/nginx.pid && \
     chown -R tf:tf /app /etc/nginx /var/lib/nginx /var/log/nginx /run/nginx.pid && \
@@ -68,6 +68,9 @@ COPY --from=web-builder --chown=tf:tf /web/out /app/web/
 COPY --chown=tf:tf ./tdlib/linux_$TARGETARCH /app/tdlib
 COPY --chown=tf:tf ./entrypoint.sh .
 COPY --chown=tf:tf ./nginx.conf.template /etc/nginx/nginx.conf.template
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=60s \
+    CMD curl -fsS http://localhost:${NGINX_PORT}/api/health || exit 1
 
 EXPOSE $NGINX_PORT
 
