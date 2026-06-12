@@ -80,32 +80,49 @@ public record FileRecord(int id, //file id will change
                 thread_chat_id      BIGINT,
                 message_thread_id   BIGINT,
                 reaction_count      BIGINT DEFAULT 0,
+                scan_state          VARCHAR(20) DEFAULT 'idle',
+                download_priority   INT DEFAULT 0,
+                queued_at           BIGINT,
                 PRIMARY KEY (id, unique_id)
             )
             """;
 
+    public static final String[] INDEXES = new String[]{
+            "CREATE INDEX idx_file_record_unique_id ON file_record (unique_id)",
+            "CREATE INDEX idx_file_record_telegram_status ON file_record (telegram_id, download_status)",
+            "CREATE INDEX idx_file_record_chat_msg ON file_record (chat_id, message_id)",
+            "CREATE INDEX idx_file_record_queue ON file_record (chat_id, download_status, queued_at)",
+            "CREATE INDEX idx_file_record_scan ON file_record (chat_id, scan_state, message_id)",
+            "CREATE INDEX idx_file_record_ready_download ON file_record (telegram_id, chat_id, download_status)",
+    };
+
     public static final TreeMap<Version, String[]> MIGRATIONS = new TreeMap<>(MapUtil.ofEntries(
             MapUtil.entry(new Version("0.1.7"), new String[]{
-                    "ALTER TABLE file_record ADD COLUMN IF NOT EXISTS start_date BIGINT;",
-                    "ALTER TABLE file_record ADD COLUMN IF NOT EXISTS completion_date BIGINT;",
+                    "ALTER TABLE file_record ADD COLUMN start_date BIGINT;",
+                    "ALTER TABLE file_record ADD COLUMN completion_date BIGINT;",
             }),
             MapUtil.entry(new Version("0.1.12"), new String[]{
-                    "ALTER TABLE file_record ADD COLUMN IF NOT EXISTS transfer_status VARCHAR(255) DEFAULT 'idle';",
+                    "ALTER TABLE file_record ADD COLUMN transfer_status VARCHAR(255) DEFAULT 'idle';",
             }),
             MapUtil.entry(new Version("0.1.15"), new String[]{
-                    "ALTER TABLE file_record ADD COLUMN IF NOT EXISTS media_album_id BIGINT;",
+                    "ALTER TABLE file_record ADD COLUMN media_album_id BIGINT;",
             }),
             MapUtil.entry(new Version("0.2.0"), new String[]{
-                    "ALTER TABLE file_record ADD COLUMN IF NOT EXISTS extra VARCHAR(4096);",
-                    "ALTER TABLE file_record ADD COLUMN IF NOT EXISTS thumbnail_unique_id VARCHAR(255);",
+                    "ALTER TABLE file_record ADD COLUMN extra VARCHAR(4096);",
+                    "ALTER TABLE file_record ADD COLUMN thumbnail_unique_id VARCHAR(255);",
             }),
             MapUtil.entry(new Version("0.2.1"), new String[]{
-                    "ALTER TABLE file_record ADD COLUMN IF NOT EXISTS tags VARCHAR(2056);",
-                    "ALTER TABLE file_record ADD COLUMN IF NOT EXISTS thread_chat_id BIGINT;",
-                    "ALTER TABLE file_record ADD COLUMN IF NOT EXISTS message_thread_id BIGINT;",
+                    "ALTER TABLE file_record ADD COLUMN tags VARCHAR(2056);",
+                    "ALTER TABLE file_record ADD COLUMN thread_chat_id BIGINT;",
+                    "ALTER TABLE file_record ADD COLUMN message_thread_id BIGINT;",
             }),
             MapUtil.entry(new Version("0.2.4"), new String[]{
-                    "ALTER TABLE file_record ADD COLUMN IF NOT EXISTS reaction_count BIGINT DEFAULT 0;",
+                    "ALTER TABLE file_record ADD COLUMN reaction_count BIGINT DEFAULT 0;",
+            }),
+            MapUtil.entry(new Version("0.3.2"), new String[]{
+                    "ALTER TABLE file_record ADD COLUMN scan_state VARCHAR(20) DEFAULT 'idle';",
+                    "ALTER TABLE file_record ADD COLUMN download_priority INT DEFAULT 0;",
+                    "ALTER TABLE file_record ADD COLUMN queued_at BIGINT;",
             })
     ));
 
@@ -118,6 +135,11 @@ public record FileRecord(int id, //file id will change
         @Override
         public TreeMap<Version, String[]> getMigrations() {
             return MIGRATIONS;
+        }
+
+        @Override
+        public String[] getIndexes() {
+            return INDEXES;
         }
     }
 

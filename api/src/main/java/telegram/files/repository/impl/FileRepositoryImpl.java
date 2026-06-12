@@ -59,11 +59,13 @@ public class FileRepositoryImpl extends AbstractSqlRepository implements FileRep
                                                 size, downloaded_size,
                                                 type, mime_type,
                                                 file_name, thumbnail, thumbnail_unique_id, caption, extra, local_path,
-                                                download_status, start_date, transfer_status, tags, thread_chat_id, message_thread_id, reaction_count)
+                                                download_status, start_date, transfer_status, tags, thread_chat_id, message_thread_id, reaction_count,
+                                                scan_state, download_priority, queued_at)
                         values (#{id}, #{unique_id}, #{telegram_id}, #{chat_id}, #{message_id}, #{media_album_id}, #{date},
                                 #{has_sensitive_content}, #{size}, #{downloaded_size}, #{type},
                                 #{mime_type}, #{file_name}, #{thumbnail}, #{thumbnail_unique_id}, #{caption}, #{extra}, #{local_path},
-                                #{download_status}, #{start_date}, #{transfer_status}, #{tags}, #{thread_chat_id}, #{message_thread_id}, #{reaction_count})
+                                #{download_status}, #{start_date}, #{transfer_status}, #{tags}, #{thread_chat_id}, #{message_thread_id}, #{reaction_count},
+                                #{scan_state}, #{download_priority}, #{queued_at})
                         """)
                 .mapFrom(FileRecord.PARAM_MAPPER)
                 .execute(fileRecord)
@@ -133,7 +135,7 @@ public class FileRepositoryImpl extends AbstractSqlRepository implements FileRep
         }
 
         Long fromMessageId = Convert.toLong(filter.get("fromMessageId"), 0L);
-        int limit = Convert.toInt(filter.get("limit"), 20);
+        int limit = Math.min(Math.max(Convert.toInt(filter.get("limit"), 20), 1), 1000);
 
         String whereClause = "type != 'thumbnail'";
         Map<String, Object> params = new HashMap<>();

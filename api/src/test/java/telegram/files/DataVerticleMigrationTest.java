@@ -197,6 +197,109 @@ public class DataVerticleMigrationTest {
         }
     }
 
+    @Test
+    @DisplayName("Double-boot idempotency: all columns present after two deployments")
+    void test_migrate_double_boot_all_columns_present(Vertx vertx, VertxTestContext testContext) {
+        vertx.deployVerticle(new DataVerticle())
+                .compose(id -> vertx.undeploy(id))
+                .compose(v -> vertx.deployVerticle(new DataVerticle()))
+                .compose(v -> DataVerticle.pool.getConnection())
+                .compose(conn -> conn.query(getColumnsQuery()).execute()
+                        .compose(result -> {
+                            testContext.verify(() -> {
+                                Set<String> columnNames = IterUtil.toList(result).stream()
+                                        .map(row -> row.getString("name"))
+                                        .collect(Collectors.toSet());
+                                Assertions.assertTrue(columnNames.contains("scan_state"));
+                                Assertions.assertTrue(columnNames.contains("download_priority"));
+                                Assertions.assertTrue(columnNames.contains("queued_at"));
+                            });
+                            return conn.close();
+                        }))
+                .compose(v -> DataVerticle.settingRepository.getByKey(SettingKey.version))
+                .onComplete(testContext.succeeding(version -> testContext.verify(() -> {
+                    Assertions.assertEquals(new Version(Start.VERSION), version);
+                    testContext.completeNow();
+                })));
+    }
+
+    @Test
+    @DisplayName("Tolerates pre-existing queue columns (prod mirror at 0.3.1)")
+    void test_migrate_tolerates_preexisting_column(Vertx vertx, VertxTestContext testContext) {
+        initializeProdMirrorDatabase(vertx)
+                .compose(v -> vertx.deployVerticle(new DataVerticle()))
+                .compose(v -> DataVerticle.pool.getConnection())
+                .compose(conn -> conn.query(getColumnsQuery()).execute()
+                        .compose(result -> {
+                            testContext.verify(() -> {
+                                Set<String> columnNames = IterUtil.toList(result).stream()
+                                        .map(row -> row.getString("name"))
+                                        .collect(Collectors.toSet());
+                                Assertions.assertTrue(columnNames.contains("scan_state"));
+                                Assertions.assertTrue(columnNames.contains("download_priority"));
+                                Assertions.assertTrue(columnNames.contains("queued_at"));
+                            });
+                            return conn.close();
+                        }))
+                .compose(v -> DataVerticle.settingRepository.getByKey(SettingKey.version))
+                .onComplete(testContext.succeeding(version -> testContext.verify(() -> {
+                    Assertions.assertEquals(new Version(Start.VERSION), version);
+                    testContext.completeNow();
+                })));
+    }
+
+    private Future<Void> initializeProdMirrorDatabase(Vertx vertx) {
+        return Future.succeededFuture()
+                .compose(v -> createTempSqlClient(vertx))
+                .compose(sqlClient -> sqlClient.query("""
+                                CREATE TABLE setting_record (
+                                    %s VARCHAR(255) PRIMARY KEY,
+                                    value TEXT NOT NULL
+                                )
+                                """.formatted(SettingRecord.KEY_FIELD)).execute()
+                        .compose(v2 -> sqlClient.query("""
+                                INSERT INTO setting_record (%s, value)
+                                VALUES ('version', '0.3.1')
+                                """.formatted(SettingRecord.KEY_FIELD)).execute())
+                        .compose(v3 -> sqlClient.query("""
+                                CREATE TABLE file_record (
+                                    id INT,
+                                    unique_id VARCHAR(255),
+                                    telegram_id BIGINT,
+                                    chat_id BIGINT,
+                                    message_id BIGINT,
+                                    media_album_id BIGINT,
+                                    date INT,
+                                    has_sensitive_content BOOLEAN,
+                                    size BIGINT,
+                                    downloaded_size BIGINT,
+                                    type VARCHAR(255),
+                                    mime_type VARCHAR(255),
+                                    file_name VARCHAR(255),
+                                    thumbnail VARCHAR(2056),
+                                    thumbnail_unique_id VARCHAR(255),
+                                    caption VARCHAR(4096),
+                                    extra VARCHAR(4096),
+                                    local_path VARCHAR(1024),
+                                    download_status VARCHAR(255),
+                                    transfer_status VARCHAR(255),
+                                    start_date BIGINT,
+                                    completion_date BIGINT,
+                                    tags VARCHAR(2056),
+                                    thread_chat_id BIGINT,
+                                    message_thread_id BIGINT,
+                                    reaction_count BIGINT DEFAULT 0,
+                                    scan_state VARCHAR(20) DEFAULT 'idle',
+                                    download_priority INT DEFAULT 0,
+                                    queued_at BIGINT,
+                                    PRIMARY KEY (id, unique_id)
+                                )
+                                """).execute())
+                        .eventually(() -> sqlClient.close())
+                )
+                .mapEmpty();
+    }
+
     private String getColumnsQuery() {
         String getColumnsQuery;
         if (Config.isPostgres()) {
