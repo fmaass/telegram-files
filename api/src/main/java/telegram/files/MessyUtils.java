@@ -4,8 +4,6 @@ import io.vertx.core.Future;
 
 import java.io.File;
 import java.io.FileInputStream;
-import java.nio.MappedByteBuffer;
-import java.nio.channels.FileChannel;
 import java.security.MessageDigest;
 import java.time.LocalDateTime;
 import java.util.concurrent.CompletableFuture;
@@ -20,21 +18,18 @@ public class MessyUtils {
     }
 
     public static String calculateFileMD5(File file) {
-        try (FileInputStream fis = new FileInputStream(file);
-             FileChannel channel = fis.getChannel()) {
-
-            MappedByteBuffer buffer = channel.map(FileChannel.MapMode.READ_ONLY, 0, file.length());
-
+        try (FileInputStream fis = new FileInputStream(file)) {
             MessageDigest md = MessageDigest.getInstance("MD5");
-
-            md.update(buffer);
-
+            byte[] buf = new byte[1024 * 1024];
+            int read;
+            while ((read = fis.read(buf)) != -1) {
+                md.update(buf, 0, read);
+            }
             byte[] md5Bytes = md.digest();
             StringBuilder hexString = new StringBuilder();
             for (byte b : md5Bytes) {
                 hexString.append(String.format("%02x", b));
             }
-
             return hexString.toString();
         } catch (Exception e) {
             return null;

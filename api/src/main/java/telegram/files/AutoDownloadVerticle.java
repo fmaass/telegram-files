@@ -48,9 +48,6 @@ public class AutoDownloadVerticle extends AbstractVerticle {
 
     private static final List<String> DEFAULT_FILE_TYPE_ORDER = List.of("photo", "video", "audio", "file");
 
-    // telegramId -> messages
-    private final Map<Long, LinkedList<MessageWrapper>> waitingDownloadMessages = new ConcurrentHashMap<>();
-
     // telegramId -> waiting scan threads
     private final Map<Long, LinkedList<WaitingScanThread>> waitingScanThreads = new ConcurrentHashMap<>();
 
@@ -62,9 +59,6 @@ public class AutoDownloadVerticle extends AbstractVerticle {
 
     public AutoDownloadVerticle() {
         this.autoRecords = AutomationsHolder.INSTANCE.autoRecords();
-        AutomationsHolder.INSTANCE.registerOnRemoveListener(removedItems -> removedItems.forEach(item ->
-                waitingDownloadMessages.getOrDefault(item.telegramId, new LinkedList<>())
-                        .removeIf(m -> m.message.chatId == item.chatId)));
     }
 
     @Override
@@ -113,15 +107,9 @@ public class AutoDownloadVerticle extends AbstractVerticle {
                                                         } else {
                                                             log.debug("History download scan complete but %d idle files remain for chat %d".formatted(result.v3, auto.chatId));
                                                         }
-                                                    }).onFailure(err -> {
-                                                        // On error, check in-memory queue as fallback
-                                                        log.warn("Failed to check idle files, falling back to in-memory queue check: %s".formatted(err.getMessage()));
-                                                        LinkedList<MessageWrapper> messageWrappers = waitingDownloadMessages.get(auto.telegramId);
-                                                        if (CollUtil.isEmpty(messageWrappers) ||
-                                                            messageWrappers.stream().noneMatch(w -> w.isHistorical)) {
-                                                            auto.complete(AutomationState.HISTORY_DOWNLOAD_COMPLETE);
-                                                        }
-                                                    });
+                                                    }).onFailure(err ->
+                                                        log.warn("Failed to check idle files: %s".formatted(err.getMessage()))
+                                                    );
                                                 }
                                             }
                                         });
@@ -253,388 +241,6 @@ public class AutoDownloadVerticle extends AbstractVerticle {
         });
     }
 
-    /**
-     * @deprecated Replaced by HistoryDiscoveryService.discoverHistory()
-     */
-    @Deprecated
-    private void addHistoryMessage(SettingAutoRecords.Automation auto) {
-        ScanParams params = new ScanParams(auto.uniqueKey(),
-                auto.download.rule,
-                auto.telegramId,
-                auto.chatId,
-                auto.download.nextFileType,
-                auto.download.nextFromMessageId);
-        
-        // Compute sentinel message date if historySince is provided
-        if (auto.download.rule.historySince != null && auto.download.rule.historySince > 0) {
-            try {
-                TelegramVerticle telegramVerticle = TelegramVerticles.getOrElseThrow(auto.telegramId);
-                TdApi.Message sentinelMessage = Future.await(
-                    telegramVerticle.client.execute(
-                        new TdApi.GetChatMessageByDate(auto.chatId, auto.download.rule.historySince)
-                    )
-                );
-                if (sentinelMessage != null) {
-                    params.sentinelMessageId = sentinelMessage.id;
-                    params.sentinelMessageDate = sentinelMessage.date;
-                    log.info("History cutoff enabled for chat %d: sentinel message ID = %d, date = %d (%s) (cutoff date: %d (%s))"
-                        .formatted(auto.chatId, params.sentinelMessageId, params.sentinelMessageDate,
-                            DateUtils.formatTelegramDate((long) params.sentinelMessageDate),
-                            auto.download.rule.historySince, DateUtils.formatTelegramDate((long) auto.download.rule.historySince)));
-                }
-            } catch (Exception e) {
-                log.warn("Failed to get sentinel message for history cutoff: %s".formatted(e.getMessage()));
-            }
-        }
-        
-        addHistoryMessage(params,
-                result -> {
-                    auto.download.nextFileType = result.nextFileType;
-                    auto.download.nextFromMessageId = result.nextFromMessageId;
-                    if (result.isComplete) {
-                        auto.complete(AutomationState.HISTORY_DOWNLOAD_SCAN_COMPLETE);
-                    }
-                },
-                System.currentTimeMillis()
-        );
-    }
-
-    /**
-     * @deprecated Replaced by HistoryDiscoveryService.discoverHistory()
-     */
-    @Deprecated
-    private void addHistoryMessage(ScanParams params,
-                                   Consumer<ScanResult> callback,
-                                   long currentTimeMillis) {
-        String uniqueKey = params.uniqueKey;
-        long telegramId = params.telegramId;
-        long chatId = params.chatId;
-        long nextFromMessageId = params.nextFromMessageId;
-        String nextFileType = params.nextFileType;
-        Tuple3<String, List<String>, String> rule = handleRule(params.rule);
-        if (StrUtil.isBlank(nextFileType)) {
-            nextFileType = rule.v2.getFirst();
-        }
-
-        log.debug("Start scan history! TelegramId: %d ChatId: %d FileType: %s".formatted(telegramId, chatId, nextFileType));
-        if (System.currentTimeMillis() - currentTimeMillis > MAX_HISTORY_SCAN_TIME) {
-            log.debug("Scan history timeout! TelegramId: %d ChatId: %d".formatted(telegramId, chatId));
-            callback.accept(new ScanResult(nextFileType, nextFromMessageId, false));
-            return;
-        }
-        if (isExceedLimit(telegramId)) {
-            log.debug("Scan history exceed per telegram account limit! TelegramId: %d ChatId: %d".formatted(telegramId, chatId));
-            callback.accept(new ScanResult(nextFileType, nextFromMessageId, false));
-            return;
-        }
-
-        TelegramVerticle telegramVerticle = TelegramVerticles.getOrElseThrow(telegramId);
-        if (!telegramVerticle.authorized) {
-            callback.accept(new ScanResult(nextFileType, nextFromMessageId, false));
-            return;
-        }
-        TdApi.SearchChatMessages searchChatMessages = new TdApi.SearchChatMessages();
-        searchChatMessages.query = rule.v1;
-        searchChatMessages.chatId = chatId;
-        
-        // Handle reverse order (oldest to newest)
-        boolean downloadOldestFirst = params.rule != null && params.rule.downloadOldestFirst;
-        if (downloadOldestFirst) {
-            // For oldest-to-newest: start from message ID 1 if beginning, use negative offset to scan forward
-            searchChatMessages.fromMessageId = nextFromMessageId == 0 ? 1 : nextFromMessageId;
-            // Use negative offset to scan forward, but ensure limit > -offset (Telegram API requirement)
-            // Start with smaller offset to avoid API error, will paginate if needed
-            searchChatMessages.offset = -10;  // Negative offset scans forward (toward newer messages)
-        } else {
-            // For newest-to-oldest (default): start from 0 (newest), scan backward
-            searchChatMessages.fromMessageId = nextFromMessageId;
-            searchChatMessages.offset = 0;  // Default behavior
-        }
-        
-        // Ensure limit is always greater than -offset (Telegram API requirement)
-        int desiredLimit = Math.min(MAX_WAITING_LENGTH, 100);
-        if (searchChatMessages.offset < 0) {
-            // When using negative offset, limit must be > -offset
-            searchChatMessages.limit = Math.max(desiredLimit, Math.abs(searchChatMessages.offset) + 1);
-        } else {
-            searchChatMessages.limit = desiredLimit;
-        }
-        searchChatMessages.filter = TdApiHelp.getSearchMessagesFilter(nextFileType);
-        searchChatMessages.topicId = params.messageThreadId > 0 ? new TdApi.MessageTopicThread(params.messageThreadId) : null;
-        final String finalNextFileType = nextFileType;
-        final long finalNextFromMessageId = nextFromMessageId;
-        TdApi.FoundChatMessages foundChatMessages = Future.await(telegramVerticle.client.execute(searchChatMessages)
-                .onFailure(r -> {
-                    log.warn("Search chat messages failed! TelegramId: %d ChatId: %d".formatted(telegramId, chatId), r);
-                    if (r instanceof TelegramRunException tre) {
-                        TdApi.Error error = tre.getError();
-                        if (error.code == 400 && ("Can't access the chat".equals(error.message))) {
-                            log.error("%s Can't access the chat, stop auto download!".formatted(uniqueKey));
-                            callback.accept(new ScanResult(finalNextFileType, nextFromMessageId, true));
-                        }
-                    }
-                })
-        );
-        if (foundChatMessages == null) {
-            callback.accept(new ScanResult(nextFileType, nextFromMessageId, false));
-            return;
-        }
-        if (foundChatMessages.messages.length == 0) {
-            List<String> fileTypes = rule.v2;
-            int nextTypeIndex = fileTypes.indexOf(nextFileType) + 1;
-            if (nextTypeIndex < fileTypes.size()) {
-                params.nextFileType = fileTypes.get(nextTypeIndex);
-                // Reset to appropriate starting position based on download order (reuse variable from line 286)
-                params.nextFromMessageId = downloadOldestFirst ? 1 : 0;
-                log.debug("%s No more %s files found! Switch to %s".formatted(uniqueKey, nextFileType, params.nextFileType));
-                addHistoryMessage(params, callback, currentTimeMillis);
-            } else {
-                // Check if nextFromMessageId is beyond newest message (should scan backwards)
-                // If we have a high nextFromMessageId but no messages, try scanning backwards
-                Long oldestMsgId = Future.await(
-                    DataVerticle.fileRepository.getMinMessageId(telegramId, chatId)
-                );
-                
-                // If we have files downloaded and nextFromMessageId is beyond the newest, reset to scan backwards
-                if (oldestMsgId != null && oldestMsgId > 0 && nextFromMessageId > oldestMsgId) {
-                    // We're beyond the newest message, reset to scan backwards from oldest
-                    log.info("%s No messages found at nextFromMessageId %d (beyond newest). Resetting to scan backwards from oldest message %d"
-                        .formatted(uniqueKey, nextFromMessageId, oldestMsgId));
-                    params.nextFileType = rule.v2.getFirst(); // Reset to first file type
-                    params.nextFromMessageId = Math.max(0, oldestMsgId - 1000); // Start slightly before oldest
-                    addHistoryMessage(params, callback, currentTimeMillis);
-                    return;
-                }
-                
-                // If nextFromMessageId is 0 and no files exist, start scanning from 0
-                // This handles the case when history scanning is first enabled
-                if (nextFromMessageId == 0 && (oldestMsgId == null || oldestMsgId == 0)) {
-                    log.debug("%s No files found yet, starting history scan from beginning. TelegramId: %d ChatId: %d"
-                        .formatted(uniqueKey, telegramId, chatId));
-                    // Keep nextFromMessageId at 0 to start scanning from the beginning
-                    callback.accept(new ScanResult(nextFileType, 0, false));
-                    return;
-                }
-                
-                // Only mark complete if we've truly exhausted all messages
-                log.debug("%s No more history files found! TelegramId: %d ChatId: %d".formatted(uniqueKey, telegramId, chatId));
-                callback.accept(new ScanResult(nextFileType, nextFromMessageId, true));
-            }
-        } else {
-            Predicate<TdApi.Message> predicate = MessageFilter.filter(rule.v3);
-            
-            // Check if we've reached the history cutoff date
-            final boolean reachedCutoff;
-            if (params.sentinelMessageDate != null && foundChatMessages.messages.length > 0) {
-                // Check the oldest message date (last in array since messages are sorted newest first)
-                int oldestMessageDate = foundChatMessages.messages[foundChatMessages.messages.length - 1].date;
-                if (oldestMessageDate < params.sentinelMessageDate) {
-                    reachedCutoff = true;
-                    log.info("Reached history cutoff at message date %d (sentinel date: %d) for chat %d"
-                        .formatted(oldestMessageDate, params.sentinelMessageDate, chatId));
-                } else {
-                    reachedCutoff = false;
-                }
-            } else {
-                reachedCutoff = false;
-            }
-            
-            DataVerticle.fileRepository.getFilesByUniqueId(TdApiHelp.getFileUniqueIds(Arrays.asList(foundChatMessages.messages)))
-                    .onSuccess(existFiles -> {
-                        List<TdApi.Message> messages = Stream.of(foundChatMessages.messages)
-                                .parallel()
-                                .filter(predicate)
-                                .filter(message -> {
-                                    // Filter out messages older than the sentinel date (use date, not ID)
-                                    if (params.sentinelMessageDate != null && message.date < params.sentinelMessageDate) {
-                                        return false;
-                                    }
-                                    
-                                    String uniqueId = TdApiHelp.getFileUniqueId(message);
-                                    if (!existFiles.containsKey(uniqueId)) {
-                                        return true;
-                                    } else {
-                                        FileRecord fileRecord = existFiles.get(uniqueId);
-                                        return fileRecord.isDownloadStatus(FileRecord.DownloadStatus.idle);
-                                    }
-                                })
-                                .toList();
-                        
-                        if (CollUtil.isEmpty(messages)) {
-                            if (reachedCutoff) {
-                                // We've reached the cutoff - check if there are existing idle files to queue
-                                log.info("History scan complete due to cutoff date for chat %d - checking for existing idle files".formatted(chatId));
-                                
-                                // Query database for existing idle files post-cutoff and queue them for download
-                                if (params.sentinelMessageDate != null) {
-                                    DataVerticle.fileRepository.getFiles(chatId, Map.of(
-                                        "downloadStatus", "idle",
-                                        "types", "audio,file",
-                                        "limit", "50"  // Queue up to 50 files at a time to avoid overwhelming
-                                    )).onSuccess(result -> {
-                                        List<FileRecord> idleFiles = result.v1;
-                                        if (!CollUtil.isEmpty(idleFiles)) {
-                                            // Queue idle files for download (don't filter by date as dates may be incorrect)
-                                            List<FileRecord> filesToQueue = idleFiles.stream()
-                                                .limit(50)  // Limit batch size to avoid overwhelming
-                                                .toList();
-                                            
-                                            if (!CollUtil.isEmpty(filesToQueue)) {
-                                                log.info("Found %d existing idle files for chat %d - fetching messages and queueing for download"
-                                                    .formatted(filesToQueue.size(), chatId));
-                                                
-                                                // Fetch messages from Telegram API and queue them
-                                                TelegramVerticle tgVerticle = TelegramVerticles.get(telegramId).orElse(null);
-                                                if (tgVerticle != null) {
-                                                    // Fetch messages in batches
-                                                    List<Long> messageIds = filesToQueue.stream()
-                                                        .map(FileRecord::messageId)
-                                                        .toList();
-                                                    
-                                                    // Use GetMessages for batch fetching
-                                                    long[] messageIdArray = messageIds.stream().mapToLong(Long::longValue).toArray();
-                                                    tgVerticle.client.execute(new TdApi.GetMessages(chatId, messageIdArray))
-                                                        .onSuccess(fetchedMessages -> {
-                                                            if (fetchedMessages != null && fetchedMessages.messages.length > 0) {
-                                                                List<TdApi.Message> messagesToQueue = Arrays.asList(fetchedMessages.messages);
-                                                                boolean queued = addWaitingDownloadMessages(telegramId, messagesToQueue, false, true);
-                                                                if (queued) {
-                                                                    log.info("Successfully queued %d idle files for download from chat %d"
-                                                                        .formatted(messagesToQueue.size(), chatId));
-                                                                }
-                                                            }
-                                                            callback.accept(new ScanResult(finalNextFileType, finalNextFromMessageId, true));
-                                                        })
-                                                        .onFailure(err -> {
-                                                            log.warn("Failed to fetch messages for idle files: %s".formatted(err.getMessage()));
-                                                            callback.accept(new ScanResult(finalNextFileType, finalNextFromMessageId, true));
-                                                        });
-                                                } else {
-                                                    log.warn("Telegram verticle not found for telegramId %d".formatted(telegramId));
-                                                    callback.accept(new ScanResult(finalNextFileType, finalNextFromMessageId, true));
-                                                }
-                                            } else {
-                                                callback.accept(new ScanResult(finalNextFileType, finalNextFromMessageId, true));
-                                            }
-                                        } else {
-                                            callback.accept(new ScanResult(finalNextFileType, finalNextFromMessageId, true));
-                                        }
-                                    }).onFailure(err -> {
-                                        log.warn("Failed to query idle files: %s".formatted(err.getMessage()));
-                                        callback.accept(new ScanResult(finalNextFileType, finalNextFromMessageId, true));
-                                    });
-                                } else {
-                                    callback.accept(new ScanResult(finalNextFileType, finalNextFromMessageId, true));
-                                }
-                            } else {
-                                // Check if nextFromMessageId from API is 0 (no more messages in this direction)
-                                // If we're scanning forwards and hit 0, try scanning backwards
-                                if (foundChatMessages.nextFromMessageId == 0 && nextFromMessageId > 0) {
-                                    Long oldestMsgId = Future.await(
-                                        DataVerticle.fileRepository.getMinMessageId(telegramId, chatId)
-                                    );
-                                    
-                                    if (oldestMsgId != null && oldestMsgId > 0 && nextFromMessageId > oldestMsgId) {
-                                        log.info("%s Hit end of forward scan at %d. Resetting to scan backwards from %d"
-                                            .formatted(uniqueKey, nextFromMessageId, oldestMsgId));
-                                        params.nextFileType = rule.v2.getFirst();
-                                        params.nextFromMessageId = Math.max(0, oldestMsgId - 1000);
-                                        addHistoryMessage(params, callback, currentTimeMillis);
-                                        return;
-                                    }
-                                }
-                                params.nextFromMessageId = foundChatMessages.nextFromMessageId;
-                                addHistoryMessage(params, callback, currentTimeMillis);
-                            }
-                        } else {
-                            boolean shouldContinue = addWaitingDownloadMessages(telegramId, messages, false, true);
-                            if (reachedCutoff) {
-                                // We've reached the cutoff - also check for existing idle files to queue
-                                log.info("History scan complete due to cutoff date for chat %d - checking for existing idle files".formatted(chatId));
-                                
-                                // Query database for existing idle files post-cutoff and queue them for download
-                                if (params.sentinelMessageDate != null) {
-                                    DataVerticle.fileRepository.getFiles(chatId, Map.of(
-                                        "downloadStatus", "idle",
-                                        "types", "audio,file",
-                                        "limit", "50"
-                                    )).onSuccess(result -> {
-                                        List<FileRecord> idleFiles = result.v1;
-                                        if (!CollUtil.isEmpty(idleFiles)) {
-                                            // Queue idle files for download (don't filter by date as dates may be incorrect)
-                                            List<FileRecord> filesToQueue = idleFiles.stream()
-                                                .limit(50)
-                                                .toList();
-                                            
-                                            if (!CollUtil.isEmpty(filesToQueue)) {
-                                                log.info("Found %d existing idle files for chat %d - fetching messages and queueing for download"
-                                                    .formatted(filesToQueue.size(), chatId));
-                                                
-                                                TelegramVerticle tgVerticle = TelegramVerticles.get(telegramId).orElse(null);
-                                                if (tgVerticle != null) {
-                                                    List<Long> messageIds = filesToQueue.stream()
-                                                        .map(FileRecord::messageId)
-                                                        .toList();
-                                                    
-                                                    long[] messageIdArray = messageIds.stream().mapToLong(Long::longValue).toArray();
-                                                    tgVerticle.client.execute(new TdApi.GetMessages(chatId, messageIdArray))
-                                                        .onSuccess(fetchedMessages -> {
-                                                            if (fetchedMessages != null && fetchedMessages.messages.length > 0) {
-                                                                List<TdApi.Message> messagesToQueue = Arrays.asList(fetchedMessages.messages);
-                                                                boolean queued = addWaitingDownloadMessages(telegramId, messagesToQueue, false, true);
-                                                                if (queued) {
-                                                                    log.info("Successfully queued %d idle files for download from chat %d"
-                                                                        .formatted(messagesToQueue.size(), chatId));
-                                                                }
-                                                            }
-                                                            callback.accept(new ScanResult(finalNextFileType, finalNextFromMessageId, true));
-                                                        })
-                                                        .onFailure(err -> {
-                                                            log.warn("Failed to fetch messages for idle files: %s".formatted(err.getMessage()));
-                                                            callback.accept(new ScanResult(finalNextFileType, finalNextFromMessageId, true));
-                                                        });
-                                                } else {
-                                                    log.warn("Telegram verticle not found for telegramId %d".formatted(telegramId));
-                                                    callback.accept(new ScanResult(finalNextFileType, finalNextFromMessageId, true));
-                                                }
-                                            } else {
-                                                callback.accept(new ScanResult(finalNextFileType, finalNextFromMessageId, true));
-                                            }
-                                        } else {
-                                            callback.accept(new ScanResult(finalNextFileType, finalNextFromMessageId, true));
-                                        }
-                                    }).onFailure(err -> {
-                                        log.warn("Failed to query idle files: %s".formatted(err.getMessage()));
-                                        callback.accept(new ScanResult(finalNextFileType, finalNextFromMessageId, true));
-                                    });
-                                } else {
-                                    callback.accept(new ScanResult(finalNextFileType, finalNextFromMessageId, true));
-                                }
-                            } else if (shouldContinue) {
-                                // Check if nextFromMessageId from API is 0 (no more messages in this direction)
-                                // If we're scanning forwards and hit 0, try scanning backwards
-                                if (foundChatMessages.nextFromMessageId == 0 && nextFromMessageId > 0) {
-                                    Long oldestMsgId = Future.await(
-                                        DataVerticle.fileRepository.getMinMessageId(telegramId, chatId)
-                                    );
-                                    
-                                    if (oldestMsgId != null && oldestMsgId > 0 && nextFromMessageId > oldestMsgId) {
-                                        log.info("%s Hit end of forward scan at %d. Resetting to scan backwards from %d"
-                                            .formatted(uniqueKey, nextFromMessageId, oldestMsgId));
-                                        params.nextFileType = rule.v2.getFirst();
-                                        params.nextFromMessageId = Math.max(0, oldestMsgId - 1000);
-                                        addHistoryMessage(params, callback, currentTimeMillis);
-                                        return;
-                                    }
-                                }
-                                params.nextFromMessageId = foundChatMessages.nextFromMessageId;
-                                addHistoryMessage(params, callback, currentTimeMillis);
-                            }
-                        }
-                    });
-        }
-    }
-
     private Tuple3<String, List<String>, String> handleRule(SettingAutoRecords.DownloadRule rule) {
         String query = null;
         List<String> fileTypes = DEFAULT_FILE_TYPE_ORDER;
@@ -673,8 +279,7 @@ public class AutoDownloadVerticle extends AbstractVerticle {
     }
 
     private boolean isExceedLimit(long telegramId) {
-        List<MessageWrapper> waitingMessages = this.waitingDownloadMessages.get(telegramId);
-        return getSurplusSize(telegramId) <= 0 || (waitingMessages != null && waitingMessages.size() > limit);
+        return getSurplusSize(telegramId) <= 0;
     }
 
     private int getSurplusSize(long telegramId) {
@@ -693,34 +298,6 @@ public class AutoDownloadVerticle extends AbstractVerticle {
                 .orElse(false);
     }
 
-    /**
-     * @deprecated Replaced by database-driven queue.
-     */
-    @Deprecated
-    private boolean addWaitingDownloadMessages(long telegramId,
-                                               List<TdApi.Message> messages,
-                                               boolean force,
-                                               boolean isHistorical) {
-        if (CollUtil.isEmpty(messages)) {
-            return false;
-        }
-        LinkedList<MessageWrapper> waitingMessages = this.waitingDownloadMessages.get(telegramId);
-        if (waitingMessages == null) {
-            waitingMessages = new LinkedList<>();
-        }
-        if (!force && waitingMessages.size() > MAX_WAITING_LENGTH) {
-            return false;
-        } else {
-            log.debug("Add waiting download messages: %d".formatted(messages.size()));
-            waitingMessages.addAll(TdApiHelp.filterUniqueMessages(messages)
-                    .stream()
-                    .map(message -> new MessageWrapper(message, isHistorical))
-                    .toList()
-            );
-        }
-        this.waitingDownloadMessages.put(telegramId, waitingMessages);
-        return true;
-    }
     
     /**
      * Queue new messages for download in database.
@@ -738,51 +315,6 @@ public class AutoDownloadVerticle extends AbstractVerticle {
             .onFailure(err -> log.error("Failed to queue new messages for download: %s".formatted(err.getMessage())));
     }
 
-    /**
-     * @deprecated Replaced by downloadFromDatabase()
-     */
-    @Deprecated
-    private void download(long telegramId) {
-        if (CollUtil.isEmpty(waitingDownloadMessages)) {
-            return;
-        }
-        LinkedList<MessageWrapper> messages = waitingDownloadMessages.get(telegramId);
-        if (CollUtil.isEmpty(messages)) {
-            return;
-        }
-        log.debug("Download start! TelegramId: %d size: %d".formatted(telegramId, messages.size()));
-        TelegramVerticle telegramVerticle = TelegramVerticles.getOrElseThrow(telegramId);
-        if (!telegramVerticle.authorized) {
-            return;
-        }
-        int surplusSize = getSurplusSize(telegramId);
-        if (surplusSize <= 0) {
-            return;
-        }
-
-        List<MessageWrapper> downloadMessages = IntStream.range(0, Math.min(surplusSize, messages.size()))
-                .mapToObj(_ -> messages.poll())
-                .toList();
-        downloadMessages.forEach(messageWrapper -> {
-            TdApi.Message message = messageWrapper.message;
-            Integer fileId = TdApiHelp.getFileId(message);
-            log.debug("Start download file: %s".formatted(fileId));
-            telegramVerticle.startDownload(message.chatId, message.id, fileId)
-                    .onSuccess(fileRecord -> {
-                        log.debug("Start download file success! ChatId: %d MessageId:%d FileId:%d"
-                                .formatted(message.chatId, message.id, fileId));
-                        if (fileRecord.threadChatId() != 0
-                            && fileRecord.messageThreadId() != 0
-                            && fileRecord.threadChatId() != fileRecord.chatId()) {
-                            waitingScanThreads.computeIfAbsent(telegramId, _ -> new LinkedList<>())
-                                    .add(new WaitingScanThread(telegramId, fileRecord.threadChatId(), fileRecord.messageThreadId()));
-                        }
-                    })
-                    .onFailure(e -> log.error("Download file failed! ChatId: %d MessageId:%d FileId:%d"
-                            .formatted(message.chatId, message.id, fileId), e));
-        });
-        log.debug("Remaining download messages: %d".formatted(messages.size()));
-    }
     
     /**
      * Download files from database-driven queue.
@@ -900,10 +432,9 @@ public class AutoDownloadVerticle extends AbstractVerticle {
                                                 log.debug("Queued %d new file(s) for download in chat %d".formatted(queued, chatId));
                                             }
                                         })
-                                        .onFailure(err -> {
-                                            log.warn("Failed to persist/queue new message, falling back to in-memory queue: %s".formatted(err.getMessage()));
-                                            addWaitingDownloadMessages(telegramId, List.of(message), true, false);
-                                        });
+                                        .onFailure(err ->
+                                            log.error("Failed to persist/queue new message: %s".formatted(err.getMessage()))
+                                        );
                                 } else {
                                     log.debug("Message %d in chat %d has no file handler (unsupported content type)".formatted(messageId, chatId));
                                 }

@@ -85,4 +85,6 @@ public interface FileRepository {
      * @return Number of files queued
      */
     Future<Integer> queueFilesForDownload(long telegramId, long chatId, int limit, Integer cutoffDateSeconds, Boolean downloadOldestFirst);
+
+    Future<Integer> queueFilesByUniqueIds(List<String> uniqueIds);
 }

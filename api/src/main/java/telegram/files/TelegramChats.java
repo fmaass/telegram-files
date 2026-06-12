@@ -4,8 +4,6 @@ import cn.hutool.core.util.StrUtil;
 import cn.hutool.log.Log;
 import cn.hutool.log.LogFactory;
 import org.drinkless.tdlib.TdApi;
-import org.jooq.lambda.tuple.Tuple;
-
 import java.util.List;
 import java.util.NavigableSet;
 import java.util.Objects;
@@ -24,6 +22,8 @@ public class TelegramChats {
     private final NavigableSet<OrderedChat> mainChatList = new TreeSet<>();
 
     private final NavigableSet<OrderedChat> archivedChatList = new TreeSet<>();
+
+    private final Object chatListsLock = new Object();
 
     private boolean haveFullMainChatList = false;
 
@@ -193,7 +193,7 @@ public class TelegramChats {
     }
 
     private void setChatPositions(TdApi.Chat chat, TdApi.ChatPosition[] positions) {
-        synchronized (Tuple.tuple(mainChatList, archivedChatList)) {
+        synchronized (chatListsLock) {
             synchronized (chat) {
                 for (TdApi.ChatPosition position : chat.positions) {
                     if (position.list.getConstructor() == TdApi.ChatListMain.CONSTRUCTOR) {

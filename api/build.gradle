@@ -5,7 +5,7 @@ plugins {
 }
 
 group = 'telegram.files'
-version = '0.3.1-fms'
+version = '0.4.0-fms'
 
 java {
     toolchain {
@@ -74,7 +74,10 @@ test {
     jvmArgs "-Djava.library.path=${System.getenv('TDLIB_PATH')}",
             "-XX:+EnableDynamicAgentLoading",
             "-javaagent:${configurations.testRuntimeClasspath.find { it.name.contains('mockito-core') }}"
-    environment "APP_ROOT", "${testClassesDirs.asPath}"
+    environment "APP_ROOT", layout.buildDirectory.dir("test-data").get().asFile.absolutePath
+    doFirst {
+        jvmArgs "-Djava.class.path=${classpath.asPath}"
+    }
     useJUnitPlatform()
     finalizedBy jacocoTestReport
 }

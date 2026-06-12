@@ -15,12 +15,7 @@ export function useTelegramMethod() {
     >
   >(new Map());
 
-  const lastResultRef = useRef<{
-    code: string | null;
-    result: unknown;
-  }>({ code: null, result: null });
-
-  const [pendingCount, setPendingCount] = useState(0); // 用 state 追踪 ref 的 size
+  const [pendingCount, setPendingCount] = useState(0);
 
   const { lastJsonMessage } = useWebsocket();
 
@@ -38,30 +33,13 @@ export function useTelegramMethod() {
     const code = lastJsonMessage.code;
     const data = lastJsonMessage.data;
 
-    lastResultRef.current = { code, result: data };
-    setLastMethod({ code, result: data }); // 同步 state
+    setLastMethod({ code, result: data });
 
     const pendingRequest = pendingRequestsRef.current.get(code);
     if (pendingRequest) {
       pendingRequest.resolve(data);
       pendingRequestsRef.current.delete(code);
       setPendingCount(pendingRequestsRef.current.size);
-    }
-  }, [lastJsonMessage]);
-
-  useEffect(() => {
-    if (!lastJsonMessage?.code) return;
-
-    const code = lastJsonMessage.code;
-    const data = lastJsonMessage.data;
-
-    lastResultRef.current = { code, result: data };
-
-    const pendingRequest = pendingRequestsRef.current.get(code);
-    if (pendingRequest) {
-      pendingRequest.resolve(data);
-      pendingRequestsRef.current.delete(code);
-      setPendingCount(pendingRequestsRef.current.size); // 更新 state
     }
   }, [lastJsonMessage]);
 
@@ -78,14 +56,10 @@ export function useTelegramMethod() {
         const result = await trigger(arg);
         const { code } = result;
 
-        if (lastResultRef.current.code === code) {
-          return lastResultRef.current.result;
-        }
-
         return new Promise((resolve, reject) => {
           const timeoutId = setTimeout(() => {
             pendingRequestsRef.current.delete(code);
-            setPendingCount(pendingRequestsRef.current.size); // 更新 state
+            setPendingCount(pendingRequestsRef.current.size);
             reject(new Error(`Request timeout for code: ${code}`));
           }, 30000);
 
@@ -93,20 +67,20 @@ export function useTelegramMethod() {
             resolve: (value) => {
               clearTimeout(timeoutId);
               pendingRequestsRef.current.delete(code);
-              setPendingCount(pendingRequestsRef.current.size); // 更新 state
+              setPendingCount(pendingRequestsRef.current.size);
               resolve(value);
             },
             reject: (reason) => {
               clearTimeout(timeoutId);
               pendingRequestsRef.current.delete(code);
-              setPendingCount(pendingRequestsRef.current.size); // 更新 state
+              setPendingCount(pendingRequestsRef.current.size);
               reject(
                 reason instanceof Error ? reason : new Error(String(reason)),
               );
             },
           });
 
-          setPendingCount(pendingRequestsRef.current.size); // 更新 state
+          setPendingCount(pendingRequestsRef.current.size);
         });
       } catch (error) {
         throw error;
