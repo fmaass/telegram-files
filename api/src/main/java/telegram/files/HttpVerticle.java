@@ -420,7 +420,7 @@ public class HttpVerticle extends AbstractVerticle {
             return;
         }
         Long chatId = Convert.toLong(ctx.pathParam("chatId"));
-        if (chatId == null || chatId < 1) {
+        if (chatId == null || chatId == 0) {
             ctx.response().setStatusCode(400).end(JsonObject.of("error", "Invalid chatId parameter").encode());
             return;
         }
@@ -491,7 +491,7 @@ public class HttpVerticle extends AbstractVerticle {
             return;
         }
         Long chatId = Convert.toLong(ctx.pathParam("chatId"));
-        if (chatId == null || chatId < 1) {
+        if (chatId == null || chatId == 0) {
             ctx.response().setStatusCode(400).end(JsonObject.of("error", "Invalid chatId parameter").encode());
             return;
         }
