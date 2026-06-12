@@ -7,6 +7,12 @@ plugins {
 group = 'telegram.files'
 version = '0.3.1-fms'
 
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(23)
+    }
+}
+
 repositories {
     mavenCentral()
 }

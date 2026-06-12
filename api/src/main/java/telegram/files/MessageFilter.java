@@ -106,7 +106,11 @@ public class MessageFilter {
             .strict(true)
             .silent(false)
             .permissions(JexlPermissions.RESTRICTED
+                    // JEXL checks the DECLARING class of a method: StrUtil inherits most
+                    // methods from CharSequenceUtil (cn.hutool.core.text), so that package
+                    // must be permitted or str: calls fail silently.
                     .compose("cn.hutool.core.util.*",
+                             "cn.hutool.core.text.*",
                              "cn.hutool.core.collection.*",
                              "cn.hutool.core.net.*",
                              "cn.hutool.core.date.*")

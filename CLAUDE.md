@@ -36,43 +36,61 @@ Local dev: API on port 8080, frontend dev server on port 3000.
 | API tests | api/src/test/java/telegram/files/ |
 | Frontend | web/src/ |
 | Build output | api/build/libs/telegram-files.jar |
-| Docker compose | docker-compose.yaml (repo root) |
-| Data volume | /Volumes/flexosaurus/downloads/telegram (mounted at /app/data) |
-| DB migrations | api/src/main/java/telegram/files/repository/migrations/ |
-| Container port mapping | 6543 -> 80 (host -> container nginx -> 8080 API) |
+| Docker compose (dev/reference) | docker-compose.yaml (repo root) |
+| Docker compose (PRODUCTION) | ~/projects/music-processor/telegram-postproc/docker-compose.yml |
+| Smoke test | misc/smoke-test.sh (fresh-install boot + health + log scan) |
+| Container port mapping (prod) | 8979 -> 8585 (host -> container nginx -> 8080 API) |
 
 ## Database
 
-SQLite at APP_ROOT by default. Optional PostgreSQL or MySQL via DB_TYPE, DB_HOST, DB_PORT, DB_USER, DB_PASSWORD, DB_NAME env vars. Migrations are Java-based in the repository/migrations/ package.
+PRODUCTION uses PostgreSQL 17 on Saturn (192.168.1.50:5455, db `telegram_files_mac`,
+user `telegram_user`; reached from containers via host gateway). Credentials live in
+`~/projects/music-processor/telegram-postproc/.env.local`. The `telegram-files-cleanup`
+sidecar container has psql preconfigured for this DB. SQLite at APP_ROOT is the
+default for fresh installs and tests only. External services (tgfiles_postproc,
+telegram-health-monitor, telegram-monitor-dashboard) read AND write `file_record`
+directly -- schema changes must keep that interface stable.
+
+Migrations are Java-based: `MIGRATIONS` maps in the repository record classes
+(e.g. FileRecord), run by `Definition.migrate()`.
 
 ## Testing
 
-JUnit 5 + Mockito for backend. No frontend tests. Tests require TDLIB_PATH pointing to native TDLib library.
+JUnit 5 + Mockito for backend; vitest (`cd web && npm test`) for frontend.
+Backend tests require TDLIB_PATH pointing to the native TDLib library:
 
-    cd api && ./gradlew test
+    cd api && JAVA_HOME=/opt/homebrew/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home \
+      TDLIB_PATH=$PWD/../tdlib/macos_silicon ./gradlew test
 
-Note: Java 25 required for compilation (Java 23 features). JaCoCo may emit warnings but tests still run.
+Gradle 8.10 must RUN on JDK <= 23 (its Groovy/ASM cannot parse newer classfiles);
+compilation uses a Java 23 toolchain auto-provisioned via the foojay resolver
+(settings.gradle). Run the daemon on Homebrew openjdk@21.
 
 ## Homelab Hosts
 
 - **Merkur** -- This machine (Mac), 192.168.1.51 -- **NEVER SSH to it, run commands directly**
 - **Saturn** -- Main Docker host (Synology NAS), 192.168.1.50, `ssh saturn.local`
 
-This service runs on Merkur only. It is NOT deployed on Saturn and has no Traefik route.
+The service container runs on Merkur; its PostgreSQL database runs on Saturn (:5455).
 
 ## Deployment Workflow
 
-Service runs locally on Merkur via Docker Compose.
+The PRODUCTION stack is managed from the music-processor project, NOT this repo's
+compose file. It includes sidecars (autoheal, cleanup, logger, postproc, health
+monitor, dashboard) that depend on this service and its DB schema.
 
-    # Build image
-    docker build -t telegram-files:main-clean .
+    # Build image (tag must match the compose file's image reference)
+    docker build -t telegram-files:0.3.1-fms .
 
-    # Deploy
-    docker compose up -d
+    # Fresh-install smoke test first
+    misc/smoke-test.sh telegram-files:0.3.1-fms
+
+    # Deploy (from the production stack directory)
+    cd ~/projects/music-processor/telegram-postproc && docker compose up -d telegram_files
 
     # Verify
     docker ps --filter name=telegram-files
-    curl -f http://localhost:6543/api/health
+    curl -f http://localhost:8979/api/health
 
 ## Git Workflow
 
