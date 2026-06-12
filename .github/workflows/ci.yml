@@ -48,11 +48,12 @@ jobs:
           wget -q -O /tmp/libs.zip https://github.com/p-vorobyev/spring-boot-starter-telegram/releases/download/1.15.0/libs.zip
           unzip -q /tmp/libs.zip -d /tmp/tdlib-extract
           mkdir -p tdlib-linux
-          cp -r /tmp/tdlib-extract/linux_x64/* tdlib-linux/
+          cp -r /tmp/tdlib-extract/libs/linux_x64/* tdlib-linux/
 
       - name: Create .env.test
         run: |
-          printf 'APP_ENV=dev\nTELEGRAM_API_ID=12345\nTELEGRAM_API_HASH=test-hash\nLOG_LEVEL=WARNING\nTELEGRAM_LOG_LEVEL=0\n' > ../.env.test
+          mkdir -p /tmp/tf-test-data
+          printf 'APP_ENV=dev\nAPP_ROOT=/tmp/tf-test-data\nTELEGRAM_API_ID=12345\nTELEGRAM_API_HASH=test-hash\nLOG_LEVEL=WARNING\nTELEGRAM_LOG_LEVEL=0\n' > ../.env.test
 
       - name: Run tests
         env:
