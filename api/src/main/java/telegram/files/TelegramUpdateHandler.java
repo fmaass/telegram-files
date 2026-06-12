@@ -24,35 +24,34 @@ public class TelegramUpdateHandler implements Client.ResultHandler {
     @Override
     public void onResult(TdApi.Object object) {
         switch (object.getConstructor()) {
-            case TdApi.UpdateAuthorizationState.CONSTRUCTOR:
+            case TdApi.UpdateAuthorizationState.CONSTRUCTOR -> {
                 if (onAuthorizationStateUpdated != null)
                     onAuthorizationStateUpdated.accept(((TdApi.UpdateAuthorizationState) object).authorizationState);
-                break;
-            case TdApi.UpdateFile.CONSTRUCTOR:
+            }
+            case TdApi.UpdateFile.CONSTRUCTOR -> {
                 if (onFileUpdated != null)
                     onFileUpdated.accept((TdApi.UpdateFile) object);
-            case TdApi.UpdateFileDownload.CONSTRUCTOR:
-                log.trace("File download update: %s".formatted(object));
-                break;
-            case TdApi.UpdateFileDownloads.CONSTRUCTOR:
+            }
+            case TdApi.UpdateFileDownload.CONSTRUCTOR ->
+                    log.trace("File download update: %s".formatted(object));
+            case TdApi.UpdateFileDownloads.CONSTRUCTOR -> {
                 if (onFileDownloadsUpdated != null)
                     onFileDownloadsUpdated.accept((TdApi.UpdateFileDownloads) object);
-                break;
-            case TdApi.UpdateNewMessage.CONSTRUCTOR:
-                if (onMessageReceived != null) {
+            }
+            case TdApi.UpdateNewMessage.CONSTRUCTOR -> {
+                if (onMessageReceived != null)
                     onMessageReceived.accept(((TdApi.UpdateNewMessage) object).message);
-                }
-            case TdApi.UpdateNewChat.CONSTRUCTOR:
-            case TdApi.UpdateChatTitle.CONSTRUCTOR:
-            case TdApi.UpdateChatPhoto.CONSTRUCTOR:
-            case TdApi.UpdateChatReadInbox.CONSTRUCTOR:
-            case TdApi.UpdateChatLastMessage.CONSTRUCTOR:
-            case TdApi.UpdateChatPosition.CONSTRUCTOR:
-                if (onChatUpdated != null) {
+            }
+            case TdApi.UpdateNewChat.CONSTRUCTOR,
+                 TdApi.UpdateChatTitle.CONSTRUCTOR,
+                 TdApi.UpdateChatPhoto.CONSTRUCTOR,
+                 TdApi.UpdateChatReadInbox.CONSTRUCTOR,
+                 TdApi.UpdateChatLastMessage.CONSTRUCTOR,
+                 TdApi.UpdateChatPosition.CONSTRUCTOR -> {
+                if (onChatUpdated != null)
                     onChatUpdated.accept(object);
-                }
-            default:
-                log.trace("Unsupported telegram update: %s".formatted(object));
+            }
+            default -> log.trace("Unsupported telegram update: %s".formatted(object));
         }
     }
 

@@ -54,7 +54,7 @@ public class FileRouteHandler {
                         if (!context.request().isEnded()) {
                             context.request().resume();
                         }
-                        context.next();
+                        context.response().setStatusCode(404).end();
                         return;
                     }
 

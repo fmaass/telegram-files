@@ -414,9 +414,9 @@ public class HttpVerticle extends AbstractVerticle {
         if (telegramVerticle == null) {
             return;
         }
-        String chatId = ctx.pathParam("chatId");
-        if (StrUtil.isBlank(chatId)) {
-            ctx.fail(400);
+        Long chatId = Convert.toLong(ctx.pathParam("chatId"));
+        if (chatId == null || chatId < 1) {
+            ctx.response().setStatusCode(400).end(JsonObject.of("error", "Invalid chatId parameter").encode());
             return;
         }
         String link = URLUtil.decode(ctx.queryParams().get("link"));
@@ -429,21 +429,19 @@ public class HttpVerticle extends AbstractVerticle {
 
         Map<String, String> filter = new HashMap<>();
         ctx.request().params().forEach(filter::put);
-        // Also check queryParams() in case params() doesn't include query string params
         ctx.queryParams().names().forEach(name -> {
             if (!filter.containsKey(name)) {
                 filter.put(name, ctx.queryParams().get(name));
             }
         });
         filter.put("search", URLUtil.decode(filter.get("search")));
-        // URL decode downloadStatuses if present (may contain URL-encoded commas)
         String downloadStatuses = filter.get("downloadStatuses");
         if (StrUtil.isNotBlank(downloadStatuses)) {
             filter.put("downloadStatuses", URLUtil.decode(downloadStatuses));
         }
         log.info("handleTelegramFiles filter params: %s downloadStatuses: %s".formatted(filter, downloadStatuses));
 
-        telegramVerticle.getChatFiles(Convert.toLong(chatId), filter)
+        telegramVerticle.getChatFiles(chatId, filter)
                 .onSuccess(ctx::json)
                 .onFailure(ctx::fail);
     }
@@ -487,13 +485,13 @@ public class HttpVerticle extends AbstractVerticle {
         if (telegramVerticle == null) {
             return;
         }
-        String chatId = ctx.pathParam("chatId");
-        if (StrUtil.isBlank(chatId)) {
-            ctx.fail(400);
+        Long chatId = Convert.toLong(ctx.pathParam("chatId"));
+        if (chatId == null || chatId < 1) {
+            ctx.response().setStatusCode(400).end(JsonObject.of("error", "Invalid chatId parameter").encode());
             return;
         }
 
-        telegramVerticle.getChatDownloadStatistics(Convert.toLong(chatId))
+        telegramVerticle.getChatDownloadStatistics(chatId)
                 .onSuccess(ctx::json)
                 .onFailure(ctx::fail);
     }
@@ -991,11 +989,8 @@ public class HttpVerticle extends AbstractVerticle {
                         .flatMap(entry -> {
                             TelegramVerticle telegramVerticle = TelegramVerticles.getOrElseThrow(entry.getKey());
 
-                            return files.stream()
-                                    .map(f -> {
-                                        JsonObject file = (JsonObject) f;
-                                        return handler.apply(telegramVerticle, file);
-                                    });
+                            return entry.getValue().stream()
+                                    .map(f -> handler.apply(telegramVerticle, (JsonObject) f));
                         })
                         .toList()
                 )
