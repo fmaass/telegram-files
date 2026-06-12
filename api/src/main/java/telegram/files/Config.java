@@ -56,13 +56,13 @@ public class Config {
     private static Level logLevel;
 
     static {
-        if (APP_ENV == null) {
-            throw new RuntimeException("APP_ENV is not set");
-        }
+        initLogger();
+
         if (APP_ROOT == null) {
             throw new RuntimeException("APP_ROOT is not set");
         }
-        if (TELEGRAM_API_ID == 0) {
+        String apiId = System.getenv("TELEGRAM_API_ID");
+        if (apiId == null || TELEGRAM_API_ID == 0) {
             throw new RuntimeException("TELEGRAM_API_ID is not set");
         }
         if (TELEGRAM_API_HASH == null) {
@@ -78,8 +78,6 @@ public class Config {
         if (!FileUtil.exist(LOG_PATH)) {
             FileUtil.mkdir(LOG_PATH);
         }
-
-        initLogger();
     }
 
     public static boolean isProd() {

@@ -68,11 +68,6 @@ public class TelegramVerticle extends AbstractVerticle {
     private long lastFileEventTime;
 
     private long lastFileDownloadEventTime;
-    
-    // Cache for trackDownloadedState setting to avoid repeated DB queries
-    private volatile Boolean trackDownloadedStateCache = null;
-    private volatile long trackDownloadedStateCacheTime = 0;
-    private static final long CACHE_TTL_MS = 60000; // 1 minute
 
     public TelegramVerticle(String rootPath) {
         this.rootPath = rootPath;
@@ -448,6 +443,9 @@ public class TelegramVerticle extends AbstractVerticle {
                                                     DataVerticle.fileRepository.updateDownloadStatus(
                                                             updatedRecord.id(), updatedRecord.uniqueId(), null,
                                                             rollbackStatus, null
+                                                    ).onFailure(rollbackErr ->
+                                                            log.error("[%s] Rollback failed for uniqueId=%s: %s"
+                                                                    .formatted(getRootId(), updatedRecord.uniqueId(), rollbackErr.getMessage()))
                                                     );
                                                 })
                                                 .map(ignore -> updatedRecord));
@@ -832,29 +830,6 @@ public class TelegramVerticle extends AbstractVerticle {
         log.error(e);
     }
     
-    private Future<Boolean> isTrackDownloadedStateEnabled() {
-        // Check cache first
-        long now = System.currentTimeMillis();
-        if (trackDownloadedStateCache != null && (now - trackDownloadedStateCacheTime) < CACHE_TTL_MS) {
-            return Future.succeededFuture(trackDownloadedStateCache);
-        }
-        
-        // Cache miss - fetch from DB
-        return DataVerticle.settingRepository.<Boolean>getByKey(SettingKey.trackDownloadedState)
-                .map(setting -> {
-                    trackDownloadedStateCache = setting != null && setting;
-                    trackDownloadedStateCacheTime = now;
-                    return trackDownloadedStateCache;
-                })
-                .recover(err -> {
-                    log.warn("[{}] Failed to fetch trackDownloadedState setting, defaulting to false: {}", 
-                             getRootId(), err.getMessage());
-                    trackDownloadedStateCache = false;
-                    trackDownloadedStateCacheTime = now;
-                    return Future.succeededFuture(false);
-                });
-    }
-
     private void handleSaveAvgSpeed() {
         if (!authorized || telegramRecord == null) return;
         AvgSpeed.SpeedStats speedStats = avgSpeed.getSpeedStats();

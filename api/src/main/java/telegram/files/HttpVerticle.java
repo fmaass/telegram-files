@@ -70,7 +70,7 @@ public class HttpVerticle extends AbstractVerticle {
             "ResetNetworkStatistics"
     );
 
-    private final List<String> unboundClients = new ArrayList<>();
+    private final List<String> unboundClients = new java.util.concurrent.CopyOnWriteArrayList<>();
 
     private final FileRouteHandler fileRouteHandler = new FileRouteHandler();
 
@@ -203,7 +203,14 @@ public class HttpVerticle extends AbstractVerticle {
                         if (ctx.response().ended()) {
                             return;
                         }
-                        ctx.response().setStatusCode(statusCode).end();
+                        Throwable cause = ctx.failure();
+                        if (cause != null && cause.getMessage() != null) {
+                            ctx.response().setStatusCode(statusCode)
+                                    .putHeader("Content-Type", "application/json")
+                                    .end(JsonObject.of("error", cause.getMessage()).encode());
+                        } else {
+                            ctx.response().setStatusCode(statusCode).end();
+                        }
                         return;
                     }
                     Throwable throwable = ctx.failure();
