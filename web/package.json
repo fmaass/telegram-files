@@ -1,6 +1,6 @@
 {
   "name": "telegram-files-web",
-  "version": "0.4.0-fms",
+  "version": "0.4.1-fms",
   "private": true,
   "type": "module",
   "scripts": {
