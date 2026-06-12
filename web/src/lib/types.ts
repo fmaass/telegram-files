@@ -198,6 +198,7 @@ export type AutoTransferRule = {
   destination: string;
   transferPolicy: TransferPolicy;
   duplicationPolicy: DuplicationPolicy;
+  useCaptionName?: boolean;
   extra: Record<string, any>
 };
 

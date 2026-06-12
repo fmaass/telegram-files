@@ -29,7 +29,8 @@ import { ChatDownloadBadge } from "@/components/chat-download-badge";
 
 export function Header() {
   const useTelegramAccountProps = useTelegramAccount();
-  const { connectionStatus, accountDownloadSpeed } = useWebsocket();
+  const { connectionStatus, accountDownloadSpeed, reconnect, telegramConnectionState } =
+    useWebsocket();
   const { settings } = useSettings();
   const isMobile = useIsMobile();
   const [showMore, setShowMore] = useState(false);
@@ -73,11 +74,21 @@ export function Header() {
             <ChatDownloadBadge />
 
             {connectionStatus && (
-              <TooltipWrapper content="WebSocket connection status">
+              <TooltipWrapper
+                content={
+                  connectionStatus === "Open"
+                    ? "Live updates connected"
+                    : "Live updates disconnected — click to reconnect"
+                }
+              >
                 <Badge
                   variant={
                     connectionStatus === "Open" ? "default" : "secondary"
                   }
+                  className={
+                    connectionStatus !== "Open" ? "cursor-pointer" : undefined
+                  }
+                  onClick={connectionStatus !== "Open" ? reconnect : undefined}
                 >
                   {connectionStatus === "Open" ? (
                     <ChevronsLeftRightEllipsisIcon className="mr-1 h-4 w-4" />
@@ -85,6 +96,15 @@ export function Header() {
                     <UnplugIcon className="mr-1 h-4 w-4" />
                   )}
                   {connectionStatus}
+                </Badge>
+              </TooltipWrapper>
+            )}
+
+            {telegramConnectionState && telegramConnectionState !== "ready" && (
+              <TooltipWrapper content="Telegram connection state">
+                <Badge variant="secondary">
+                  <UnplugIcon className="mr-1 h-4 w-4" />
+                  Telegram: {telegramConnectionState}
                 </Badge>
               </TooltipWrapper>
             )}

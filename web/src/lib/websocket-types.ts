@@ -12,6 +12,7 @@ export const WebSocketMessageType = {
   FILE_UPDATE: 3,
   FILE_DOWNLOAD: 4,
   FILE_STATUS: 5,
+  CONNECTION: 6,
 };
 
 export type TelegramError = {
@@ -29,4 +30,6 @@ export const TelegramConstructor = {
   WAIT_CODE: 52643073,
   WAIT_PASSWORD: 112238030,
   WAIT_OTHER_DEVICE_CONFIRMATION: 860166378,
+  WAIT_PREMIUM_PURCHASE: 2097616261,
+  LOGGING_OUT: 154449270,
 };

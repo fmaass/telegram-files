@@ -95,6 +95,8 @@ monitor, dashboard) that depend on this service and its DB schema.
     # Verify
     docker ps --filter name=telegram-files
     curl -f http://localhost:8979/api/health
+    # For changes touching HTTP handlers/routes, also verify a real API call:
+    curl -f http://localhost:8979/api/telegrams
 
 ## Git Workflow
 

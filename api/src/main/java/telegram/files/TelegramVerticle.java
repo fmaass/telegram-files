@@ -65,6 +65,8 @@ public class TelegramVerticle extends AbstractVerticle {
 
     private long downloadStatusReconciliationTimerId;
 
+    public TdApi.ConnectionState lastConnectionState;
+
     private long lastFileEventTime;
 
     private long lastFileDownloadEventTime;
@@ -104,6 +106,7 @@ public class TelegramVerticle extends AbstractVerticle {
         telegramUpdateHandler.setOnFileDownloadsUpdated(this::onFileDownloadsUpdated);
         telegramUpdateHandler.setOnChatUpdated(telegramChats::onChatUpdated);
         telegramUpdateHandler.setOnMessageReceived(this::onMessageReceived);
+        telegramUpdateHandler.setOnConnectionStateUpdated(this::onConnectionStateUpdated);
 
         client.initialize(telegramUpdateHandler, this::handleException, this::handleException);
         Future.all(initEventConsumer(), initAvgSpeed())
@@ -211,7 +214,10 @@ public class TelegramVerticle extends AbstractVerticle {
             return (Objects.equals(filter.get("downloadStatus"), FileRecord.DownloadStatus.idle.name()) ?
                     this.getIdleChatFiles(searchChatMessages, 0) :
                     client.execute(searchChatMessages))
-                    .compose(t -> TelegramConverter.convertFiles(this.telegramRecord.id(), t));
+                    .compose(t -> {
+                        preloadThumbnails(t);
+                        return TelegramConverter.convertFiles(this.telegramRecord.id(), t);
+                    });
         }
     }
 
@@ -476,6 +482,28 @@ public class TelegramVerticle extends AbstractVerticle {
                         log.debug("[%s] Download thumbnail: %s".formatted(this.getRootId(), thumbnailRecord.uniqueId()));
                     }
                 });
+    }
+
+    /**
+     * Eagerly downloads the lightweight thumbnails for the given messages so previews are crisp
+     * while browsing, without having to download the full media. Fire-and-forget: already
+     * downloaded thumbnails are skipped by {@link #downloadThumbnail}.
+     */
+    private void preloadThumbnails(TdApi.FoundChatMessages foundChatMessages) {
+        if (foundChatMessages == null || foundChatMessages.messages == null || telegramRecord == null) {
+            return;
+        }
+        for (TdApi.Message message : foundChatMessages.messages) {
+            TdApiHelp.getFileHandler(message).ifPresent(fileHandler -> {
+                FileRecord thumbnailRecord = fileHandler.convertThumbnailRecord(telegramRecord.id());
+                if (thumbnailRecord == null) {
+                    return;
+                }
+                downloadThumbnail(message.chatId, message.id, thumbnailRecord)
+                        .onFailure(err -> log.debug("[%s] Preload thumbnail failed for message %d: %s"
+                                .formatted(getRootId(), message.id, err.getMessage())));
+            });
+        }
     }
 
     public Future<Void> cancelDownload(Integer fileId) {
@@ -778,6 +806,9 @@ public class TelegramVerticle extends AbstractVerticle {
         if ("completed".equals(fileUpdated.getString("downloadStatus"))) {
             DataVerticle.fileRepository.getByUniqueId(file.remote.uniqueId)
                     .compose(mainFileRecord -> {
+                        if (mainFileRecord != null) {
+                            statusData.put("type", mainFileRecord.type());
+                        }
                         if (mainFileRecord != null && mainFileRecord.thumbnailUniqueId() != null) {
                             return FileRecordRetriever.getThumbnails(List.of(mainFileRecord))
                                     .map(thumbnailMap -> {
@@ -829,7 +860,32 @@ public class TelegramVerticle extends AbstractVerticle {
     private void handleException(Throwable e) {
         log.error(e);
     }
-    
+
+    private Future<Void> cleanupOldVerticle(String oldRootPath) {
+        if (oldRootPath.equals(this.rootPath)) {
+            return Future.succeededFuture();
+        }
+        Optional<TelegramVerticle> found = TelegramVerticles.getAll().stream()
+                .filter(v -> v != this && oldRootPath.equals(v.rootPath))
+                .findFirst();
+        if (found.isEmpty()) {
+            return Future.succeededFuture();
+        }
+        TelegramVerticle old = found.get();
+        log.info("[%s] Replacing stale verticle at path: %s".formatted(getRootId(), oldRootPath));
+        TelegramVerticles.remove(old);
+        String deployId = old.deploymentID();
+        if (deployId == null) {
+            return Future.succeededFuture();
+        }
+        return vertx.undeploy(deployId)
+                .recover(e -> {
+                    log.warn("[%s] Could not undeploy stale verticle: %s".formatted(getRootId(), e.getMessage()));
+                    return Future.succeededFuture();
+                })
+                .mapEmpty();
+    }
+
     private void handleSaveAvgSpeed() {
         if (!authorized || telegramRecord == null) return;
         AvgSpeed.SpeedStats speedStats = avgSpeed.getSpeedStats();
@@ -965,6 +1021,28 @@ public class TelegramVerticle extends AbstractVerticle {
                 .onFailure(e -> log.error("[%s] Failed to get downloading files for reconciliation: %s".formatted(getRootId(), e.getMessage())));
     }
 
+    private void onConnectionStateUpdated(TdApi.ConnectionState connectionState) {
+        this.lastConnectionState = connectionState;
+        log.debug("[%s] Connection state: %s".formatted(getRootId(), connectionState.getClass().getSimpleName()));
+        if (connectionState.getConstructor() == TdApi.ConnectionStateWaitingForNetwork.CONSTRUCTOR) {
+            // Tell TDLib the network is available so it retries connecting instead of waiting indefinitely.
+            client.execute(new TdApi.SetNetworkType(new TdApi.NetworkTypeOther()), true);
+        }
+        sendEvent(EventPayload.build(EventPayload.TYPE_CONNECTION, new JsonObject()
+                .put("state", connectionStateName(connectionState))));
+    }
+
+    private static String connectionStateName(TdApi.ConnectionState state) {
+        return switch (state.getConstructor()) {
+            case TdApi.ConnectionStateReady.CONSTRUCTOR -> "ready";
+            case TdApi.ConnectionStateConnecting.CONSTRUCTOR -> "connecting";
+            case TdApi.ConnectionStateConnectingToProxy.CONSTRUCTOR -> "connectingToProxy";
+            case TdApi.ConnectionStateUpdating.CONSTRUCTOR -> "updating";
+            case TdApi.ConnectionStateWaitingForNetwork.CONSTRUCTOR -> "waitingForNetwork";
+            default -> "unknown";
+        };
+    }
+
     private void onAuthorizationStateUpdated(TdApi.AuthorizationState authorizationState) {
         log.debug("[%s] Receive authorization state update: %s".formatted(getRootId(), authorizationState));
         this.lastAuthorizationState = authorizationState;
@@ -992,6 +1070,8 @@ public class TelegramVerticle extends AbstractVerticle {
             case TdApi.AuthorizationStateWaitCode.CONSTRUCTOR:
             case TdApi.AuthorizationStateWaitRegistration.CONSTRUCTOR:
             case TdApi.AuthorizationStateWaitPassword.CONSTRUCTOR:
+            case TdApi.AuthorizationStateWaitPremiumPurchase.CONSTRUCTOR:
+                authorized = false;
                 sendEvent(EventPayload.build(EventPayload.TYPE_AUTHORIZATION, authorizationState));
                 break;
             case TdApi.AuthorizationStateReady.CONSTRUCTOR:
@@ -1000,6 +1080,23 @@ public class TelegramVerticle extends AbstractVerticle {
                     client.execute(new TdApi.GetMe())
                             .compose(user ->
                                     DataVerticle.telegramRepository.create(new TelegramRecord(user.id, user.firstName, this.rootPath, this.proxyName))
+                                            .recover(e -> {
+                                                if (e.getMessage() != null && (e.getMessage().contains("UNIQUE constraint") ||
+                                                        e.getMessage().contains("SQLITE_CONSTRAINT") ||
+                                                        e.getMessage().contains("duplicate key"))) {
+                                                    return DataVerticle.telegramRepository.getById(user.id)
+                                                            .compose(existing -> {
+                                                                if (existing != null) {
+                                                                    return cleanupOldVerticle(existing.rootPath())
+                                                                            .compose(_ -> DataVerticle.telegramRepository.update(
+                                                                                    new TelegramRecord(user.id, user.firstName, this.rootPath, this.proxyName)
+                                                                            ));
+                                                                }
+                                                                return Future.failedFuture(e);
+                                                            });
+                                                }
+                                                return Future.failedFuture(e);
+                                            })
                             )
                             .onSuccess(o -> {
                                 telegramRecord = o;
@@ -1016,10 +1113,14 @@ public class TelegramVerticle extends AbstractVerticle {
                 syncCompletedFilesStatus();
                 break;
             case TdApi.AuthorizationStateLoggingOut.CONSTRUCTOR:
+                authorized = false;
+                sendEvent(EventPayload.build(EventPayload.TYPE_AUTHORIZATION, authorizationState));
                 break;
             case TdApi.AuthorizationStateClosing.CONSTRUCTOR:
+                authorized = false;
                 break;
             case TdApi.AuthorizationStateClosed.CONSTRUCTOR:
+                authorized = false;
                 if (needDelete) {
                     File root = FileUtil.file(this.rootPath);
                     if (root.exists()) {
