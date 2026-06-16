@@ -15,7 +15,7 @@ Java 23 / Vert.x 5 backend + Next.js React SPA, single Docker container.
 
 - Upstream: jarvis2f/telegram-files, remote name `upstream`
 - Forked at: v0.3.0 (commit 154fd6ae, Dec 26 2025)
-- Fork version: 0.4.1-fms (set in api/build.gradle, web/package.json, VERSION, Start.java)
+- Fork version: 0.4.2-fms (set in api/build.gradle, web/package.json, VERSION, Start.java)
 - Check upstream: `git fetch upstream && git log --oneline HEAD..upstream/main`
 - upstream/dev has commits that may overlap with features we implemented independently. Handle duplicates if upstream merges dev into main.
 
@@ -84,13 +84,15 @@ compose file. It includes sidecars (autoheal, cleanup, logger, postproc, health
 monitor, dashboard) that depend on this service and its DB schema.
 
     # Build image (tag must match the compose file's image reference)
-    docker build -t telegram-files:0.4.1-fms .
+    docker build -t telegram-files:0.4.2-fms .
 
     # Fresh-install smoke test first
-    misc/smoke-test.sh telegram-files:0.4.1-fms
+    misc/smoke-test.sh telegram-files:0.4.2-fms
 
-    # Deploy (from the production stack directory)
-    cd ~/projects/music-processor/telegram-postproc && docker compose up -d telegram_files
+    # Deploy (from the production stack directory — project name + env-file flags required)
+    cd ~/projects/music-processor/telegram-postproc && \
+      docker compose -p telegram-files-stack --env-file .env --env-file .env.local \
+      up -d telegram_files
 
     # Verify
     docker ps --filter name=telegram-files
