@@ -83,7 +83,14 @@ public class FileRepositoryImpl extends AbstractSqlRepository implements FileRep
                     }
                 })
                 .onSuccess(r -> log.trace("Successfully created file record: %s".formatted(fileRecord.id())))
-                .onFailure(err -> log.error("Failed to create file record: %s".formatted(err.getMessage())));
+                .onFailure(err -> {
+                    String msg = err.getMessage();
+                    if (msg != null && (msg.contains("constraint") || msg.toLowerCase().contains("duplicate"))) {
+                        log.debug("File record already exists (create race): %s".formatted(fileRecord.uniqueId()));
+                    } else {
+                        log.error("Failed to create file record: %s".formatted(msg));
+                    }
+                });
     }
 
     @Override
@@ -111,7 +118,8 @@ public class FileRepositoryImpl extends AbstractSqlRepository implements FileRep
                         }
                         return Future.succeededFuture(false);
                     }
-                    return this.create(fileRecord).map(true);
+                    return this.create(fileRecord).map(true)
+                            .recover(_ -> Future.succeededFuture(false));
                 });
     }
 

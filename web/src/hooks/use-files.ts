@@ -226,7 +226,7 @@ export function useFiles(
         if (filters.showMissingOriginal === false && file.originalDeleted) {
           return;
         }
-        files.push({
+        const merged = {
           ...file,
           id: latestFilesStatus[file.uniqueId]?.fileId ?? file.id,
           downloadStatus:
@@ -246,7 +246,27 @@ export function useFiles(
           thumbnailFile:
             latestFilesStatus[file.uniqueId]?.thumbnailFile ??
             file.thumbnailFile,
-        });
+        };
+        if (
+          filters.downloadStatuses &&
+          filters.downloadStatuses.length > 0 &&
+          !filters.downloadStatuses.includes(merged.downloadStatus)
+        ) {
+          return;
+        }
+        if (
+          filters.downloadStatus &&
+          merged.downloadStatus !== filters.downloadStatus
+        ) {
+          return;
+        }
+        if (
+          filters.transferStatus &&
+          merged.transferStatus !== filters.transferStatus
+        ) {
+          return;
+        }
+        files.push(merged);
       });
     });
     files.forEach((file, index) => {
@@ -254,7 +274,7 @@ export function useFiles(
       file.next = files[index + 1];
     });
     return files;
-  }, [pages, latestFilesStatus]);
+  }, [pages, latestFilesStatus, filters.downloadStatus, filters.downloadStatuses, filters.transferStatus, filters.showMissingOriginal]);
 
   const hasMore = useMemo(() => {
     if (!pages || pages.length === 0) return true;
