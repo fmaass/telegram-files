@@ -15,7 +15,7 @@ Java 23 / Vert.x 5 backend + Next.js React SPA, single Docker container.
 
 - Upstream: jarvis2f/telegram-files, remote name `upstream`
 - Forked at: v0.3.0 (commit 154fd6ae, Dec 26 2025)
-- Fork version: 0.4.2-fms (set in api/build.gradle, web/package.json, VERSION, Start.java)
+- Fork version: 0.4.3-fms (set in api/build.gradle, web/package.json, VERSION, Start.java)
 - Check upstream: `git fetch upstream && git log --oneline HEAD..upstream/main`
 - upstream/dev has commits that may overlap with features we implemented independently. Handle duplicates if upstream merges dev into main.
 
@@ -84,10 +84,10 @@ compose file. It includes sidecars (autoheal, cleanup, logger, postproc, health
 monitor, dashboard) that depend on this service and its DB schema.
 
     # Build image (tag must match the compose file's image reference)
-    docker build -t telegram-files:0.4.2-fms .
+    docker build -t telegram-files:0.4.3-fms .
 
     # Fresh-install smoke test first
-    misc/smoke-test.sh telegram-files:0.4.2-fms
+    misc/smoke-test.sh telegram-files:0.4.3-fms
 
     # Deploy (from the production stack directory — project name + env-file flags required)
     cd ~/projects/music-processor/telegram-postproc && \
@@ -116,6 +116,9 @@ monitor, dashboard) that depend on this service and its DB schema.
 - **JEXL constructor calls**: filter expressions must not contain `new()` constructor invocations. JexlFeatures blocks these at the engine level, and input validation rejects them before JEXL evaluation as defense-in-depth.
 - **Telegram ID ranges**: chat IDs for groups/supergroups/channels are large negative numbers (e.g. -1001359914106). Never validate chatId as positive-only. User IDs are positive; chat IDs can be either.
 - **Map.of() null keys**: `Map.of()` / `Map.copyOf()` throw NPE on `.get(null)` / `.containsKey(null)`. Always null-guard the key before calling these methods, or use `HashMap` when null keys are expected.
+- **Upstream code is not pre-reviewed code**: cherry-picked/upstream diffs get the SAME adversarial review as code we author -- never label an integration "clean apply, low risk" and skip scrutiny based on the contributor's track record. A trusted contributor's PR (#138) shipped a silent-failure regression we copied verbatim; the upstream maintainer caught it on read, we didn't. "Apply verbatim" in a plan is a flag to review the thing being copied, not a reason to trust it.
+- **Over-broad failure recovery = silent failure**: `Future.recover(_ -> ...)`, blanket `catch`, and similar fallbacks that swallow ALL errors hide genuine failures (DB down, pool exhausted, non-PK constraint) behind a "success" path. Recover only the specific expected condition (e.g. re-check `getByUniqueId` and return "exists" ONLY if the row is actually present; otherwise propagate). Silent failure is this project's #1 risk pattern.
+- **Test the failure branch, not just the happy path**: any error-handling change (`.recover`/`catch`/fallback) MUST have a test for the non-target failure mode, not only the scenario the author intended. When a method's return value drives caller control flow (e.g. `false` = "row exists, proceed"), trace and test every path that produces that value. The #138 test covered only the race it fixed, so the swallowed-error regression passed review.
 
 ## Session Review
 

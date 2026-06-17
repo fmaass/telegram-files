@@ -5,8 +5,10 @@ import io.vertx.core.Future;
 import io.vertx.core.Vertx;
 import org.junit.jupiter.api.*;
 import telegram.files.repository.FileRecord;
+import telegram.files.repository.impl.FileRepositoryImpl;
 
 import java.util.List;
+import java.util.concurrent.CompletionException;
 
 public class FileCreateRaceTest {
 
@@ -85,5 +87,57 @@ public class FileCreateRaceTest {
                 DataVerticle.fileRepository.getByUniqueId(rec.uniqueId())
         );
         Assertions.assertNotNull(stored);
+    }
+
+    @Test
+    @DisplayName("Genuine create failure with no pre-existing row should propagate error")
+    void genuineCreateFailure_propagatesError() {
+        FileRepositoryImpl failingRepo = new FileRepositoryImpl(DataVerticle.pool) {
+            @Override
+            public Future<FileRecord> create(FileRecord fileRecord) {
+                return Future.failedFuture(new RuntimeException("Simulated: DB connection pool exhausted"));
+            }
+        };
+
+        FileRecord rec = new FileRecord(
+                300, "genuine_fail_unique", 1, 1, 300, 0, 1, false, 1024, 0,
+                "file", "application/octet-stream", "genuine_fail.bin", null, null, null, null, null,
+                FileRecord.DownloadStatus.idle.name(), FileRecord.TransferStatus.idle.name(),
+                0, null, null, 0, 0, 0, null, null, null
+        );
+
+        Future<Boolean> result = failingRepo.createIfNotExist(rec);
+
+        CompletionException thrown = Assertions.assertThrows(
+                CompletionException.class,
+                () -> MessyUtils.await(result)
+        );
+        Assertions.assertTrue(
+                thrown.getCause().getMessage().contains("Simulated: DB connection pool exhausted"),
+                "Should propagate the original error, not swallow it"
+        );
+    }
+
+    @Test
+    @DisplayName("Lost race (row exists after create failure) should return false")
+    void lostRace_rowExistsAfterFailure_returnsFalse() {
+        FileRecord rec = new FileRecord(
+                400, "lost_race_unique", 1, 1, 400, 0, 1, false, 512, 0,
+                "file", "text/plain", "lost_race.txt", null, null, null, null, null,
+                FileRecord.DownloadStatus.idle.name(), FileRecord.TransferStatus.idle.name(),
+                0, null, null, 0, 0, 0, null, null, null
+        );
+
+        MessyUtils.await(DataVerticle.fileRepository.create(rec));
+
+        FileRepositoryImpl failingRepo = new FileRepositoryImpl(DataVerticle.pool) {
+            @Override
+            public Future<FileRecord> create(FileRecord fileRecord) {
+                return Future.failedFuture(new RuntimeException("Simulated: constraint violation"));
+            }
+        };
+
+        Boolean result = MessyUtils.await(failingRepo.createIfNotExist(rec));
+        Assertions.assertFalse(result, "Should return false when row exists after failed create (lost race)");
     }
 }

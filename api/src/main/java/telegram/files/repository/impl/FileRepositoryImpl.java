@@ -88,7 +88,7 @@ public class FileRepositoryImpl extends AbstractSqlRepository implements FileRep
                     if (msg != null && (msg.contains("constraint") || msg.toLowerCase().contains("duplicate"))) {
                         log.debug("File record already exists (create race): %s".formatted(fileRecord.uniqueId()));
                     } else {
-                        log.error("Failed to create file record: %s".formatted(msg));
+                        log.error(err, "Failed to create file record: %s".formatted(msg));
                     }
                 });
     }
@@ -119,7 +119,10 @@ public class FileRepositoryImpl extends AbstractSqlRepository implements FileRep
                         return Future.succeededFuture(false);
                     }
                     return this.create(fileRecord).map(true)
-                            .recover(_ -> Future.succeededFuture(false));
+                            .recover(err -> this.getByUniqueId(fileRecord.uniqueId())
+                                    .compose(existing -> existing != null
+                                            ? Future.succeededFuture(false)
+                                            : Future.failedFuture(err)));
                 });
     }
 
