@@ -235,32 +235,51 @@ public class HttpVerticle extends AbstractVerticle {
 
     private Future<Void> initEventConsumer() {
         vertx.eventBus().consumer(EventEnum.TELEGRAM_EVENT.address(), message -> {
-            log.debug("Received telegram event: %s".formatted(message.body()));
+            // Guard the debug log: TDLib publishes a large UpdateFile ~1/s, and
+            // "...".formatted(body) builds the full event-body string for EVERY
+            // event regardless of log level. Eagerly formatting it on the event
+            // loop backlogs this consumer until Vert.x pauses it and discards
+            // download events (downloads stall, only thumbnails land).
+            if (log.isDebugEnabled()) {
+                log.debug("Received telegram event: %s".formatted(message.body()));
+            }
             JsonObject jsonObject = (JsonObject) message.body();
             String telegramId = jsonObject.getString("telegramId");
-            EventPayload payload = jsonObject.getJsonObject("payload").mapTo(EventPayload.class);
 
+            // Resolve live websocket targets FIRST and bail out before the
+            // expensive payload mapTo()/encode() when nobody is listening
+            // (the common case: no dashboard tab open).
             Set<String> sentSessionIds = new HashSet<>();
+            List<String> targets = new ArrayList<>();
             sessionTelegramVerticles.entrySet().stream()
                     .filter(e -> Objects.equals(Convert.toStr(e.getValue().getId()), telegramId))
                     .map(Map.Entry::getKey)
                     .forEach(sessionId -> {
+                        sentSessionIds.add(sessionId);
                         String wsHandlerId = clients.get(sessionId);
                         if (StrUtil.isNotBlank(wsHandlerId)) {
-                            vertx.eventBus().send(wsHandlerId, Json.encode(payload));
+                            targets.add(wsHandlerId);
                         }
-                        sentSessionIds.add(sessionId);
                     });
-
-            unboundClients.forEach(sessionId -> {
+            for (String sessionId : unboundClients) {
                 if (sentSessionIds.contains(sessionId)) {
-                    return;
+                    continue;
                 }
                 String wsHandlerId = clients.get(sessionId);
                 if (StrUtil.isNotBlank(wsHandlerId)) {
-                    vertx.eventBus().send(wsHandlerId, Json.encode(payload));
+                    targets.add(wsHandlerId);
                 }
-            });
+            }
+            if (targets.isEmpty()) {
+                return;
+            }
+
+            // Encode the payload ONCE for the fanout, not per-client.
+            EventPayload payload = jsonObject.getJsonObject("payload").mapTo(EventPayload.class);
+            String encoded = Json.encode(payload);
+            for (String wsHandlerId : targets) {
+                vertx.eventBus().send(wsHandlerId, encoded);
+            }
         });
 
         vertx.eventBus().consumer(EventEnum.AUTO_DOWNLOAD_UPDATE.address(), message -> {

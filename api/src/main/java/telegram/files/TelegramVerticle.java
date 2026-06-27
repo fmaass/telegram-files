@@ -214,10 +214,14 @@ public class TelegramVerticle extends AbstractVerticle {
             return (Objects.equals(filter.get("downloadStatus"), FileRecord.DownloadStatus.idle.name()) ?
                     this.getIdleChatFiles(searchChatMessages, 0) :
                     client.execute(searchChatMessages))
-                    .compose(t -> {
-                        preloadThumbnails(t);
-                        return TelegramConverter.convertFiles(this.telegramRecord.id(), t);
-                    });
+                    .compose(t ->
+                            // Eager thumbnail preload DISABLED (regression from PR #132-#135):
+                            // preloadThumbnails() called downloadThumbnail() for EVERY message on
+                            // every online list-load/scan, flooding TDLib file events and the
+                            // HttpVerticle TELEGRAM_EVENT consumer until Vert.x paused it and
+                            // new-message ingestion froze (albums stopped downloading). Thumbnails
+                            // now load on demand, as in 0.4.0.
+                            TelegramConverter.convertFiles(this.telegramRecord.id(), t));
         }
     }
 
