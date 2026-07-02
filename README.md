@@ -210,6 +210,14 @@ refer to the [LICENSE](LICENSE) file.
 
 ## 🆗 FAQs
 
+**Q.** Why are image/video previews blurry (or blank) for files I haven't downloaded yet?
+
+**A.** Previews use Telegram's low-resolution minithumbnail until the file itself is
+downloaded; there is no automatic full-thumbnail fetch while browsing. The eager
+thumbnail preload was removed in `0.4.5-fms` because it called into TDLib for every
+message on every list-load, flooding the file-event stream until new-message ingestion
+froze. Download a file to get its crisp preview.
+
 ~~**Q.** Can't start the api server, error：`java.lang.UnsatisfiedLinkError: no tdjni in java.library.path`~~
 
 ~~**A.** Maybe download tdlib failed, you can see the [entrypoint.sh](entrypoint.sh) file, then download tdlib

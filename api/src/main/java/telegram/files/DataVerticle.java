@@ -24,6 +24,7 @@ import telegram.files.repository.impl.TelegramRepositoryImpl;
 
 import java.io.File;
 import java.util.List;
+import java.util.concurrent.TimeUnit;
 
 public class DataVerticle extends AbstractVerticle {
 
@@ -110,13 +111,30 @@ public class DataVerticle extends AbstractVerticle {
         return dataPath;
     }
 
-    private Pool buildSqlClient() {
-        PoolOptions poolOptions = new PoolOptions()
+    /**
+     * Shared connection pool options. Package-private and static so the sizing and
+     * timeout contract can be unit-tested without a running verticle.
+     * <p>
+     * Vert.x 5 {@code PoolOptions} defaults the idle-timeout unit to SECONDS, so the
+     * historical {@code setIdleTimeout(300000)} meant ~3.5 days, not 5 minutes. The
+     * explicit MILLISECONDS unit makes idle reaping match the 5-minute cleaner period.
+     */
+    static PoolOptions buildPoolOptions() {
+        return new PoolOptions()
                 .setShared(true)
-                .setMaxSize(3)
+                // maxSize 5 (was 3): TDLib download bursts write file_record frequently
+                // while sharing the pool with HTTP list/count queries. Saturn PostgreSQL
+                // headroom checked 2026-07-02 (max_connections=100, 54 in use, ~43 free),
+                // so +2 is safe and does not starve the external consumer containers.
+                .setMaxSize(5)
                 .setName("pool-tf")
                 .setIdleTimeout(300000)
+                .setIdleTimeoutUnit(TimeUnit.MILLISECONDS)
                 .setPoolCleanerPeriod(300000);
+    }
+
+    private Pool buildSqlClient() {
+        PoolOptions poolOptions = buildPoolOptions();
 
         return createPool(vertx,
                 Config.isSqlite() ? new JDBCConnectOptions()

@@ -215,12 +215,14 @@ public class TelegramVerticle extends AbstractVerticle {
                     this.getIdleChatFiles(searchChatMessages, 0) :
                     client.execute(searchChatMessages))
                     .compose(t ->
-                            // Eager thumbnail preload DISABLED (regression from PR #132-#135):
-                            // preloadThumbnails() called downloadThumbnail() for EVERY message on
-                            // every online list-load/scan, flooding TDLib file events and the
-                            // HttpVerticle TELEGRAM_EVENT consumer until Vert.x paused it and
-                            // new-message ingestion froze (albums stopped downloading). Thumbnails
-                            // now load on demand, as in 0.4.0.
+                            // Eager thumbnail preload REMOVED (regression from PR #132-#135):
+                            // it called downloadThumbnail() for EVERY message on every online
+                            // list-load/scan, flooding TDLib file events and the HttpVerticle
+                            // TELEGRAM_EVENT consumer until Vert.x paused it and new-message
+                            // ingestion froze (albums stopped downloading). Previews are now
+                            // minithumbnail-only until a file is downloaded (see the thumbnail
+                            // previews ADR). The eager-preload method was deleted so an upstream
+                            // merge that reintroduces it must be reviewed, not silently re-armed.
                             TelegramConverter.convertFiles(this.telegramRecord.id(), t));
         }
     }
@@ -488,28 +490,6 @@ public class TelegramVerticle extends AbstractVerticle {
                 });
     }
 
-    /**
-     * Eagerly downloads the lightweight thumbnails for the given messages so previews are crisp
-     * while browsing, without having to download the full media. Fire-and-forget: already
-     * downloaded thumbnails are skipped by {@link #downloadThumbnail}.
-     */
-    private void preloadThumbnails(TdApi.FoundChatMessages foundChatMessages) {
-        if (foundChatMessages == null || foundChatMessages.messages == null || telegramRecord == null) {
-            return;
-        }
-        for (TdApi.Message message : foundChatMessages.messages) {
-            TdApiHelp.getFileHandler(message).ifPresent(fileHandler -> {
-                FileRecord thumbnailRecord = fileHandler.convertThumbnailRecord(telegramRecord.id());
-                if (thumbnailRecord == null) {
-                    return;
-                }
-                downloadThumbnail(message.chatId, message.id, thumbnailRecord)
-                        .onFailure(err -> log.debug("[%s] Preload thumbnail failed for message %d: %s"
-                                .formatted(getRootId(), message.id, err.getMessage())));
-            });
-        }
-    }
-
     public Future<Void> cancelDownload(Integer fileId) {
         return client.execute(new TdApi.GetFile(fileId))
                 .compose(file -> DataVerticle.fileRepository
@@ -775,7 +755,7 @@ public class TelegramVerticle extends AbstractVerticle {
 
     public Future<String> execute(String method, Object params) {
         String code = RandomUtil.randomString(10);
-        log.trace("[%s] Execute code: %s method: %s, params: %s".formatted(getRootId(), code, method, params));
+        log.trace("[{}] Execute code: {} method: {}, params: {}", getRootId(), code, method, params);
         return Future.future(promise -> {
             TdApi.Function<?> func = TdApiHelp.getFunction(method, params);
             if (func == null) {
@@ -783,7 +763,7 @@ public class TelegramVerticle extends AbstractVerticle {
                 return;
             }
             client.getNativeClient().send(func, object -> {
-                log.debug("[%s] Execute: [%s] Receive result: %s".formatted(getRootId(), code, object));
+                log.debug("[{}] Execute: [{}] Receive result: {}", getRootId(), code, object);
                 handleDefaultResult(object, code);
             });
             promise.complete(code);
@@ -1143,7 +1123,7 @@ public class TelegramVerticle extends AbstractVerticle {
     }
 
     private void onFileUpdated(TdApi.UpdateFile updateFile) {
-        log.trace("📃[%s] Receive file update: %s".formatted(getRootId(), updateFile));
+        log.trace("📃[{}] Receive file update: {}", getRootId(), updateFile);
         TdApi.File file = updateFile.file;
         if (file != null) {
             String localPath = null;
@@ -1175,7 +1155,7 @@ public class TelegramVerticle extends AbstractVerticle {
                             if (downloadStatus == null) {
                                 // Check if download actually completed even though getDownloadStatus returned null
                                 if (file.local != null && file.local.isDownloadingCompleted) {
-                                    log.debug("[%s] File download completed but getDownloadStatus returned null: %s".formatted(getRootId(), file.remote.uniqueId));
+                                    log.debug("[{}] File download completed but getDownloadStatus returned null: {}", getRootId(), file.remote.uniqueId);
                                     downloadStatus = FileRecord.DownloadStatus.completed;
                                 } else {
                                     downloadStatus = FileRecord.DownloadStatus.idle;
@@ -1226,7 +1206,7 @@ public class TelegramVerticle extends AbstractVerticle {
     }
 
     private void onFileDownloadsUpdated(TdApi.UpdateFileDownloads updateFileDownloads) {
-        log.trace("[%s] Receive file downloads update: %s".formatted(getRootId(), updateFileDownloads));
+        log.trace("[{}] Receive file downloads update: {}", getRootId(), updateFileDownloads);
         avgSpeed.update(updateFileDownloads.downloadedSize, System.currentTimeMillis());
         if (lastFileDownloadEventTime == 0 || System.currentTimeMillis() - lastFileDownloadEventTime > 1000) {
             sendEvent(EventPayload.build(EventPayload.TYPE_FILE_DOWNLOAD, updateFileDownloads));
@@ -1235,7 +1215,7 @@ public class TelegramVerticle extends AbstractVerticle {
     }
 
     private void onMessageReceived(TdApi.Message message) {
-        log.trace("[%s] Receive message: %s".formatted(getRootId(), message));
+        log.trace("[{}] Receive message: {}", getRootId(), message);
         if (this.telegramRecord == null) {
             log.trace("[%s] Telegram record is null, can't handle message".formatted(getRootId()));
             return;

@@ -43,13 +43,16 @@ public class BackendMiscTest {
     }
 
     @Test
-    @DisplayName("unboundClients is a concurrent list")
-    void test_unboundClients_is_concurrent() throws Exception {
-        var field = HttpVerticle.class.getDeclaredField("unboundClients");
-        field.setAccessible(true);
+    @DisplayName("unboundClients is a concurrent Set that dedups reconnects (BL-02)")
+    void test_unboundClients_is_concurrent_dedup_set() {
         HttpVerticle verticle = new HttpVerticle();
-        Object list = field.get(verticle);
-        assertInstanceOf(java.util.concurrent.CopyOnWriteArrayList.class, list);
+        // Must be a Set, not a List: a reconnect re-adding the same sessionId must
+        // not create a duplicate entry (which would fan out duplicate ws events).
+        assertInstanceOf(java.util.Set.class, verticle.unboundClients);
+        verticle.unboundClients.clear();
+        verticle.unboundClients.add("s1");
+        verticle.unboundClients.add("s1");
+        assertEquals(1, verticle.unboundClients.size(), "duplicate sessionId must be deduped");
     }
 
     @Test

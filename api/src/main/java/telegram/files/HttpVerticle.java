@@ -44,11 +44,11 @@ public class HttpVerticle extends AbstractVerticle {
 
     private static final Log log = LogFactory.get();
 
-    // session id -> ws handler id
-    private static final Map<String, String> clients = new ConcurrentHashMap<>();
+    // session id -> ws handler id (package-private for fanout unit tests)
+    static final Map<String, String> clients = new ConcurrentHashMap<>();
 
-    // session id -> telegram verticle
-    private final Map<String, TelegramVerticle> sessionTelegramVerticles = new ConcurrentHashMap<>();
+    // session id -> telegram verticle (package-private for fanout unit tests)
+    final Map<String, TelegramVerticle> sessionTelegramVerticles = new ConcurrentHashMap<>();
     
     static final Set<String> ALLOWED_TDLIB_METHODS = Set.of(
             "SetAuthenticationPhoneNumber",
@@ -59,7 +59,10 @@ public class HttpVerticle extends AbstractVerticle {
             "ResetNetworkStatistics"
     );
 
-    private final List<String> unboundClients = new java.util.concurrent.CopyOnWriteArrayList<>();
+    // Websocket sessions with no bound telegramId. A Set (not a List) so a reconnect
+    // that re-adds the same sessionId cannot create duplicate event deliveries.
+    // Package-private for fanout unit tests.
+    final Set<String> unboundClients = ConcurrentHashMap.newKeySet();
 
     private final FileRouteHandler fileRouteHandler = new FileRouteHandler();
 
@@ -247,46 +250,74 @@ public class HttpVerticle extends AbstractVerticle {
             String telegramId = jsonObject.getString("telegramId");
 
             // Resolve live websocket targets FIRST and bail out before the
-            // expensive payload mapTo()/encode() when nobody is listening
-            // (the common case: no dashboard tab open).
-            Set<String> sentSessionIds = new HashSet<>();
-            List<String> targets = new ArrayList<>();
-            sessionTelegramVerticles.entrySet().stream()
-                    .filter(e -> Objects.equals(Convert.toStr(e.getValue().getId()), telegramId))
-                    .map(Map.Entry::getKey)
-                    .forEach(sessionId -> {
-                        sentSessionIds.add(sessionId);
-                        String wsHandlerId = clients.get(sessionId);
-                        if (StrUtil.isNotBlank(wsHandlerId)) {
-                            targets.add(wsHandlerId);
-                        }
-                    });
-            for (String sessionId : unboundClients) {
-                if (sentSessionIds.contains(sessionId)) {
-                    continue;
-                }
-                String wsHandlerId = clients.get(sessionId);
-                if (StrUtil.isNotBlank(wsHandlerId)) {
-                    targets.add(wsHandlerId);
-                }
-            }
+            // payload encode when nobody is listening (the common case: no
+            // dashboard tab open).
+            List<String> targets = resolveEventTargets(telegramId);
             if (targets.isEmpty()) {
                 return;
             }
 
-            // Encode the payload ONCE for the fanout, not per-client.
-            EventPayload payload = jsonObject.getJsonObject("payload").mapTo(EventPayload.class);
-            String encoded = Json.encode(payload);
+            // The published payload is already a Jackson-serialized EventPayload;
+            // encode the JsonObject directly (once, for the fanout) instead of the
+            // redundant mapTo(EventPayload)/Json.encode() databind round-trip. The
+            // wire output is identical and the frontend parses it key-order-agnostically.
+            String encoded = jsonObject.getJsonObject("payload").encode();
             for (String wsHandlerId : targets) {
                 vertx.eventBus().send(wsHandlerId, encoded);
             }
         });
 
         vertx.eventBus().consumer(EventEnum.AUTO_DOWNLOAD_UPDATE.address(), message -> {
-            log.debug("Auto settings update: %s".formatted(message.body()));
+            log.debug("Auto settings update: {}", message.body());
             AutomationsHolder.INSTANCE.onAutoRecordsUpdate(Json.decodeValue(message.body().toString(), SettingAutoRecords.class));
         });
         return Future.succeededFuture();
+    }
+
+    /**
+     * Resolve the live websocket handler ids that should receive an event for
+     * {@code telegramId}: every session bound to that telegram plus every
+     * unbound session, each at most once. Package-private and side-effect-free
+     * so the fanout can be unit-tested without a running verticle.
+     */
+    List<String> resolveEventTargets(String telegramId) {
+        Set<String> sentSessionIds = new HashSet<>();
+        List<String> targets = new ArrayList<>();
+        sessionTelegramVerticles.entrySet().stream()
+                .filter(e -> Objects.equals(Convert.toStr(e.getValue().getId()), telegramId))
+                .map(Map.Entry::getKey)
+                .forEach(sessionId -> {
+                    sentSessionIds.add(sessionId);
+                    String wsHandlerId = clients.get(sessionId);
+                    if (StrUtil.isNotBlank(wsHandlerId)) {
+                        targets.add(wsHandlerId);
+                    }
+                });
+        for (String sessionId : unboundClients) {
+            if (sentSessionIds.contains(sessionId)) {
+                continue;
+            }
+            String wsHandlerId = clients.get(sessionId);
+            if (StrUtil.isNotBlank(wsHandlerId)) {
+                targets.add(wsHandlerId);
+            }
+        }
+        return targets;
+    }
+
+    /**
+     * Tear down the shared session registration when a websocket closes, but
+     * ONLY if the closing socket is still the live one. {@code clients} is keyed
+     * by the stable HTTP session id and overwritten on reconnect, so a late
+     * close from an old socket after a same-session reconnect must not evict the
+     * newer registration. The compare-and-remove on the ws handler id makes a
+     * stale close a no-op. Package-private for unit testing.
+     */
+    void handleWebSocketClose(String sessionId, String wsHandlerId) {
+        if (clients.remove(sessionId, wsHandlerId)) {
+            sessionTelegramVerticles.remove(sessionId);
+            unboundClients.remove(sessionId);
+        }
     }
 
     private void handleWebSocket(RoutingContext ctx) {
@@ -314,9 +345,11 @@ public class HttpVerticle extends AbstractVerticle {
 
                     ws.exceptionHandler(throwable -> log.error("WebSocket error: %s".formatted(throwable.getMessage())));
                     ws.closeHandler(_ -> {
-                        clients.remove(sessionId);
-                        sessionTelegramVerticles.remove(sessionId);
+                        // Always cancel THIS socket's own ping timer, then tear down
+                        // the shared session registration only if this socket is still
+                        // the live one (stale close after a reconnect is a no-op).
                         vertx.cancelTimer(timerId);
+                        handleWebSocketClose(sessionId, ws.textHandlerID());
                         log.debug("WebSocket closed. SessionId: %s".formatted(sessionId));
                     });
 
