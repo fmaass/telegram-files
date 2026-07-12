@@ -391,8 +391,16 @@ public class HistoryDiscoveryService {
                                             uniqueKey, existing.downloadStatus(), existing.fileName()));
                                         currentStatus = FileRecord.DownloadStatus.idle;
                                     }
-                                    if (currentStatus != FileRecord.DownloadStatus.idle && currentStatus != FileRecord.DownloadStatus.completed) {
-                                        // Reset non-idle/non-completed files to idle for retry
+                                    // NEVER-DOWNGRADE (contract §2): once an external service sets
+                                    // 'processed' or 'imported', discovery must NOT reset it to idle.
+                                    // Scope is {processed, imported} ONLY — 'completed' is left alone
+                                    // (already excluded), and downloading/paused/error legitimately
+                                    // reset to idle for retry (external reset-stuck also does this).
+                                    if (currentStatus != FileRecord.DownloadStatus.idle
+                                            && currentStatus != FileRecord.DownloadStatus.completed
+                                            && currentStatus != FileRecord.DownloadStatus.processed
+                                            && currentStatus != FileRecord.DownloadStatus.imported) {
+                                        // Reset non-terminal, non-idle files to idle for retry
                                         return DataVerticle.fileRepository.updateDownloadStatus(
                                             existing.id(),
                                             existing.uniqueId(),

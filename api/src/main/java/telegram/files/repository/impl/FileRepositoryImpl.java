@@ -12,7 +12,9 @@ import cn.hutool.log.LogFactory;
 import io.vertx.core.Future;
 import io.vertx.core.json.JsonArray;
 import io.vertx.core.json.JsonObject;
+import io.vertx.sqlclient.Pool;
 import io.vertx.sqlclient.SqlClient;
+import io.vertx.sqlclient.SqlConnection;
 import io.vertx.sqlclient.SqlResult;
 import io.vertx.sqlclient.templates.SqlTemplate;
 import org.jooq.lambda.tuple.Tuple;
@@ -52,8 +54,14 @@ public class FileRepositoryImpl extends AbstractSqlRepository implements FileRep
             "reaction_count", "reaction_count"
     );
 
+    private final Pool pool;
+
     public FileRepositoryImpl(SqlClient sqlClient) {
         super(sqlClient);
+        // Transactions (atomic claim) require a Pool. In production and every test the repository is
+        // constructed with DataVerticle.pool (a Pool); guard so a non-Pool client fails loudly at
+        // claim time rather than silently skipping the transaction.
+        this.pool = (sqlClient instanceof Pool p) ? p : null;
     }
 
     @Override
@@ -683,42 +691,109 @@ public class FileRepositoryImpl extends AbstractSqlRepository implements FileRep
                         return Future.succeededFuture(null);
                     }
                     boolean pathUpdated = !Objects.equals(record.localPath(), localPath);
-                    boolean downloadStatusUpdated = !record.isDownloadStatus(downloadStatus);
-                    if (!pathUpdated && !downloadStatusUpdated) {
+                    boolean downloadStatusUpdated = downloadStatus != null && !record.isDownloadStatus(downloadStatus);
+                    // A completion_date-only change (same status/path) must still persist — the startup
+                    // completed-file sync sets a missing completion_date without changing status.
+                    boolean completionDateUpdated = completionDate != null
+                            && !Objects.equals(record.completionDate(), completionDate);
+                    if (!pathUpdated && !downloadStatusUpdated && !completionDateUpdated) {
                         return Future.succeededFuture(null);
+                    }
+
+                    // Enforce the state machine: reject illegal download_status transitions at the
+                    // boundary (canTransitionTo is authoritative; previously defined but unenforced).
+                    // A path-only update (no status change) is always allowed.
+                    if (downloadStatusUpdated && !isLegalTransition(record.downloadStatus(), downloadStatus)) {
+                        log.warn("Rejected illegal download_status transition %s -> %s for %s"
+                                .formatted(record.downloadStatus(), downloadStatus.name(), uniqueId));
+                        return Future.succeededFuture(null);
+                    }
+
+                    String targetStatus = downloadStatusUpdated ? downloadStatus.name() : record.downloadStatus();
+                    String targetLocalPath = pathUpdated ? localPath : record.localPath();
+
+                    // Exact-state CAS: pin the EXACT observed prior status. If an external service (or a
+                    // concurrent app writer) already moved the row off that state, rowCount is 0 and we
+                    // do NOT clobber. downloadStatusPrior is nullable (legacy rows) so use IS NOT
+                    // DISTINCT FROM semantics via a null-safe predicate.
+                    // completion_date (D10): only overwrite when the caller supplies one, OR when
+                    // transitioning INTO a terminal state; otherwise preserve the existing value so a
+                    // completed row re-reported as e.g. downloading does not lose its date.
+                    boolean writeCompletionDate = completionDate != null
+                            || (downloadStatusUpdated && downloadStatus.isTerminal());
+                    Long completionDateToWrite = completionDate != null ? completionDate : record.completionDate();
+
+                    Map<String, Object> params = new HashMap<>();
+                    params.put("fileId", fileId);
+                    params.put("uniqueId", uniqueId);
+                    params.put("localPath", targetLocalPath);
+                    params.put("downloadStatus", targetStatus);
+                    params.put("priorStatus", record.downloadStatus());
+                    String casPredicate = record.downloadStatus() == null
+                            ? "download_status IS NULL"
+                            : "download_status = #{priorStatus}";
+                    String completionAssign;
+                    if (writeCompletionDate) {
+                        params.put("completionDate", completionDateToWrite);
+                        completionAssign = "completion_date = #{completionDate},";
+                    } else {
+                        completionAssign = "";
                     }
 
                     return SqlTemplate
                             .forUpdate(sqlClient, """
                                     UPDATE file_record SET id = #{fileId},
                                                            local_path = #{localPath},
-                                                           download_status = #{downloadStatus},
-                                                           completion_date = #{completionDate}
-                                    WHERE unique_id = #{uniqueId}
-                                    """)
-                            .execute(MapUtil.ofEntries(MapUtil.entry("fileId", fileId),
-                                    MapUtil.entry("uniqueId", uniqueId),
-                                    MapUtil.entry("localPath", pathUpdated ? localPath : record.localPath()),
-                                    MapUtil.entry("downloadStatus", downloadStatusUpdated ? downloadStatus.name() : record.downloadStatus()),
-                                    MapUtil.entry("completionDate", completionDate)
-                            ))
+                                                           %s
+                                                           download_status = #{downloadStatus}
+                                    WHERE unique_id = #{uniqueId} AND %s
+                                    """.formatted(completionAssign, casPredicate))
+                            .execute(params)
                             .onFailure(err ->
                                     log.error("Failed to update file record: %s".formatted(err.getMessage()))
                             )
                             .map(r -> {
+                                if (r.rowCount() == 0) {
+                                    // Lost the CAS (external reset / concurrent writer). No clobber.
+                                    log.debug("updateDownloadStatus CAS no-op (prior state changed) for %s (expected %s)"
+                                            .formatted(uniqueId, record.downloadStatus()));
+                                    return null;
+                                }
                                 JsonObject result = JsonObject.of();
                                 if (pathUpdated) {
                                     result.put("localPath", localPath);
-                                    result.put("completionDate", completionDate);
+                                    if (writeCompletionDate) {
+                                        result.put("completionDate", completionDateToWrite);
+                                    }
                                 }
                                 if (downloadStatusUpdated) {
                                     result.put("downloadStatus", downloadStatus.name());
                                 }
                                 log.debug("Successfully updated file record: %s, path: %s, status: %s, before: %s, %s"
-                                        .formatted(uniqueId, localPath, downloadStatus.name(), record.localPath(), record.downloadStatus()));
+                                        .formatted(uniqueId, localPath, targetStatus, record.localPath(), record.downloadStatus()));
                                 return result;
                             });
                 });
+    }
+
+    /**
+     * Null-tolerant {@link FileRecord.DownloadStatus#canTransitionTo}. A null/unknown prior status is
+     * treated as {@code idle} (mirrors the discovery/reconcile fallback) so genuinely legal recovery
+     * paths are not blocked; an unknown TARGET can never occur (callers pass enum values).
+     */
+    private static boolean isLegalTransition(String priorStatusName, FileRecord.DownloadStatus target) {
+        FileRecord.DownloadStatus prior;
+        if (priorStatusName == null) {
+            prior = FileRecord.DownloadStatus.idle;
+        } else {
+            try {
+                prior = FileRecord.DownloadStatus.valueOf(priorStatusName);
+            } catch (IllegalArgumentException e) {
+                // Legacy/phantom value in DB (e.g. 'downloaded'): treat as idle for transition legality.
+                prior = FileRecord.DownloadStatus.idle;
+            }
+        }
+        return prior.canTransitionTo(target);
     }
 
     @Override
@@ -860,12 +935,23 @@ public class FileRepositoryImpl extends AbstractSqlRepository implements FileRep
         if (StrUtil.isBlank(uniqueId)) {
             return Future.succeededFuture();
         }
+        // Application-enforced CASCADE: download_attempt has no SQL FK (concurrent createTable +
+        // file_record's PK-swap migration preclude one), so clear its attempts here.
         return SqlTemplate
                 .forUpdate(sqlClient, """
-                        DELETE FROM file_record WHERE unique_id = #{uniqueId}
+                        DELETE FROM download_attempt WHERE unique_id = #{uniqueId}
                         """)
                 .execute(Map.of("uniqueId", uniqueId))
-                .onFailure(err -> log.error("Failed to delete file record: %s".formatted(err.getMessage()))
+                .recover(err -> {
+                    log.warn("Failed to delete download attempts for %s: %s".formatted(uniqueId, err.getMessage()));
+                    return Future.succeededFuture(null);
+                })
+                .compose(ignore -> SqlTemplate
+                        .forUpdate(sqlClient, """
+                                DELETE FROM file_record WHERE unique_id = #{uniqueId}
+                                """)
+                        .execute(Map.of("uniqueId", uniqueId))
+                        .onFailure(err -> log.error("Failed to delete file record: %s".formatted(err.getMessage())))
                 )
                 .mapEmpty();
     }
@@ -984,14 +1070,22 @@ public class FileRepositoryImpl extends AbstractSqlRepository implements FileRep
         params.put("limit", limit);
         params.put("queuedAt", System.currentTimeMillis());
         
+        // D2: key the claim on unique_id (the PRIMARY KEY), NOT the non-unique telegram file `id`.
+        // Selecting/matching on `id` mass-queues every row that happens to share a telegram file id.
+        // D9: renew queued_at for (a) never-queued rows (queued_at IS NULL) AND (b) rows an external
+        // service reset downloading->idle whose stale queued_at from the FIRST attempt is still
+        // populated. A reset row's signature (contract §4) is idle + start_date NULL + downloaded_size
+        // 0; renewing its queued_at makes reconciliation measure the CURRENT retry, not the first queue
+        // event. Already-queued idle rows that were never reset keep their position (not re-timestamped).
         StringBuilder queryBuilder = new StringBuilder("""
             WITH files_to_queue AS (
-                SELECT id FROM file_record
+                SELECT unique_id FROM file_record
                 WHERE telegram_id = #{telegramId}
                   AND download_status = 'idle'
                   AND (scan_state = 'idle' OR scan_state IS NULL)
                   AND type != 'thumbnail'
-                  AND queued_at IS NULL
+                  AND (queued_at IS NULL
+                       OR (start_date IS NULL AND (downloaded_size = 0 OR downloaded_size IS NULL)))
             """);
         
         if (chatId != 0) {
@@ -1017,7 +1111,7 @@ public class FileRepositoryImpl extends AbstractSqlRepository implements FileRep
             )
             UPDATE file_record
             SET queued_at = #{queuedAt}
-            WHERE id IN (SELECT id FROM files_to_queue)
+            WHERE unique_id IN (SELECT unique_id FROM files_to_queue)
             """);
         
         String finalQuery = queryBuilder.toString();
@@ -1048,12 +1142,288 @@ public class FileRepositoryImpl extends AbstractSqlRepository implements FileRep
         for (int i = 0; i < uniqueIds.size(); i++) {
             params.put("uid" + i, uniqueIds.get(i));
         }
+        // D9: renew queued_at for never-queued idle rows AND externally-reset idle rows (reset
+        // signature: start_date IS NULL AND downloaded_size 0/NULL, contract §4) so a manual re-download
+        // measures the current attempt, not the first queue event.
         String sql = """
                 UPDATE file_record SET queued_at = #{queuedAt}
-                WHERE unique_id IN (%s) AND download_status = 'idle' AND queued_at IS NULL
+                WHERE unique_id IN (%s) AND download_status = 'idle'
+                  AND (queued_at IS NULL
+                       OR (start_date IS NULL AND (downloaded_size = 0 OR downloaded_size IS NULL)))
                 """.formatted(inClause);
         return SqlTemplate.forUpdate(sqlClient, sql)
                 .execute(params)
                 .map(SqlResult::rowCount);
+    }
+
+    // ------------------------------------------------------------------------------------------
+    // Download-attempt state machine (Phase 2): atomic claim + scoped attempt ownership.
+    // ------------------------------------------------------------------------------------------
+
+    @Override
+    public Future<String> claimForDownload(int fileId, String uniqueId, String leaseOwner) {
+        if (StrUtil.isBlank(uniqueId)) {
+            return Future.succeededFuture(null);
+        }
+        if (pool == null) {
+            return Future.failedFuture(new IllegalStateException(
+                    "claimForDownload requires a transactional Pool; repository was constructed with a non-Pool client"));
+        }
+        String attemptId = java.util.UUID.randomUUID().toString();
+        long now = System.currentTimeMillis();
+        // ONE transaction: exact-state CAS idle->downloading AND INSERT the owning active attempt.
+        // Both-or-neither. The partial unique index (one active attempt per unique_id) makes the
+        // INSERT fail if another active attempt exists, rolling the whole claim back.
+        return pool.withTransaction(conn ->
+                SqlTemplate.forUpdate(conn, """
+                                UPDATE file_record
+                                SET download_status = 'downloading',
+                                    id = #{fileId},
+                                    start_date = #{now},
+                                    queued_at = COALESCE(queued_at, #{now})
+                                WHERE unique_id = #{uniqueId} AND download_status = 'idle'
+                                """)
+                        .execute(MapUtil.ofEntries(
+                                MapUtil.entry("fileId", fileId),
+                                MapUtil.entry("uniqueId", uniqueId),
+                                MapUtil.entry("now", now)
+                        ))
+                        .compose(r -> {
+                            if (r.rowCount() == 0) {
+                                // Not idle (already claimed / terminal / externally reset mid-claim).
+                                // Roll back by failing the transaction with a sentinel; caller sees null.
+                                return Future.failedFuture(new ClaimNotIdleException());
+                            }
+                            return SqlTemplate.forUpdate(conn, """
+                                            INSERT INTO download_attempt
+                                                (attempt_id, unique_id, lease_owner, lease_expires_at, status, created_at, updated_at)
+                                            VALUES
+                                                (#{attemptId}, #{uniqueId}, #{leaseOwner}, NULL, 'active', #{now}, #{now})
+                                            """)
+                                    .execute(MapUtil.ofEntries(
+                                            MapUtil.entry("attemptId", attemptId),
+                                            MapUtil.entry("uniqueId", uniqueId),
+                                            MapUtil.entry("leaseOwner", leaseOwner),
+                                            MapUtil.entry("now", now)
+                                    ))
+                                    .map(attemptId);
+                        })
+        ).recover(err -> {
+            if (err instanceof ClaimNotIdleException) {
+                log.debug("claimForDownload no-op (not idle) for %s".formatted(uniqueId));
+                return Future.succeededFuture(null);
+            }
+            // A duplicate-active-attempt unique violation also means "someone else owns the claim".
+            String msg = err.getMessage() != null ? err.getMessage().toLowerCase() : "";
+            if (msg.contains("uq_download_attempt_active") || msg.contains("unique") || msg.contains("duplicate")) {
+                log.debug("claimForDownload lost race (active attempt exists) for %s".formatted(uniqueId));
+                return Future.succeededFuture(null);
+            }
+            log.error("claimForDownload failed for %s: %s".formatted(uniqueId, err.getMessage()));
+            return Future.failedFuture(err);
+        });
+    }
+
+    private static final class ClaimNotIdleException extends RuntimeException {
+        ClaimNotIdleException() {
+            super("file_record not idle", null, false, false);
+        }
+    }
+
+    @Override
+    public Future<Boolean> transitionOwned(int fileId,
+                                           String uniqueId,
+                                           String attemptId,
+                                           FileRecord.DownloadStatus expectedFrom,
+                                           FileRecord.DownloadStatus target,
+                                           String localPath,
+                                           Long completionDate) {
+        if (StrUtil.isBlank(uniqueId) || StrUtil.isBlank(attemptId) || expectedFrom == null || target == null) {
+            return Future.succeededFuture(false);
+        }
+        if (!expectedFrom.canTransitionTo(target)) {
+            log.warn("Rejected illegal owned transition %s -> %s for %s".formatted(expectedFrom, target, uniqueId));
+            return Future.succeededFuture(false);
+        }
+        if (pool == null) {
+            return Future.failedFuture(new IllegalStateException("transitionOwned requires a transactional Pool"));
+        }
+        long now = System.currentTimeMillis();
+        boolean writeCompletionDate = completionDate != null || target.isTerminal();
+        boolean retireAttempt = target.isTerminal() || target == FileRecord.DownloadStatus.idle;
+
+        Map<String, Object> params = new HashMap<>();
+        params.put("fileId", fileId);
+        params.put("uniqueId", uniqueId);
+        params.put("attemptId", attemptId);
+        params.put("expectedFrom", expectedFrom.name());
+        params.put("target", target.name());
+        params.put("localPath", localPath);
+        String completionAssign = "";
+        if (writeCompletionDate) {
+            // Preserve an existing completion_date when the caller passes none (COALESCE): a terminal
+            // transition without an explicit date must not null an already-set date (D10).
+            params.put("completionDate", completionDate);
+            completionAssign = "completion_date = COALESCE(#{completionDate}, completion_date),";
+        }
+        String localPathAssign = localPath != null ? "local_path = #{localPath}," : "";
+
+        // Exact-state CAS scoped to the owning attempt: transition only if the row is EXACTLY in
+        // expectedFrom AND this attempt is still the active one. A stale writer or a superseded attempt
+        // gets rowCount 0 and does not clobber. Tolerates external reset (row no longer in expectedFrom).
+        String updateSql = """
+                UPDATE file_record
+                SET id = #{fileId},
+                    %s
+                    %s
+                    download_status = #{target}
+                WHERE unique_id = #{uniqueId}
+                  AND download_status = #{expectedFrom}
+                  AND EXISTS (SELECT 1 FROM download_attempt da
+                              WHERE da.attempt_id = #{attemptId}
+                                AND da.unique_id = #{uniqueId}
+                                AND da.status = 'active')
+                """.formatted(localPathAssign, completionAssign);
+
+        return pool.withTransaction(conn ->
+                SqlTemplate.forUpdate(conn, updateSql)
+                        .execute(params)
+                        .compose(r -> {
+                            if (r.rowCount() == 0) {
+                                return Future.succeededFuture(false);
+                            }
+                            if (!retireAttempt) {
+                                return Future.succeededFuture(true);
+                            }
+                            String retiredStatus = target.isTerminal()
+                                    ? (target == FileRecord.DownloadStatus.completed ? "completed"
+                                       : target == FileRecord.DownloadStatus.error ? "failed" : "completed")
+                                    : "retired";
+                            return SqlTemplate.forUpdate(conn, """
+                                            UPDATE download_attempt
+                                            SET status = #{retiredStatus}, updated_at = #{now}
+                                            WHERE attempt_id = #{attemptId} AND status = 'active'
+                                            """)
+                                    .execute(MapUtil.ofEntries(
+                                            MapUtil.entry("attemptId", attemptId),
+                                            MapUtil.entry("retiredStatus", retiredStatus),
+                                            MapUtil.entry("now", now)
+                                    ))
+                                    .map(true);
+                        })
+        ).onFailure(err -> log.error("transitionOwned failed for %s: %s".formatted(uniqueId, err.getMessage())));
+    }
+
+    @Override
+    public Future<JsonObject> completeDownloadAndRetireAttempt(int fileId,
+                                                               String uniqueId,
+                                                               String localPath,
+                                                               Long completionDate) {
+        if (StrUtil.isBlank(uniqueId)) {
+            return Future.succeededFuture(null);
+        }
+        if (pool == null) {
+            return Future.failedFuture(new IllegalStateException(
+                    "completeDownloadAndRetireAttempt requires a transactional Pool"));
+        }
+        long now = System.currentTimeMillis();
+        Map<String, Object> params = new HashMap<>();
+        params.put("fileId", fileId);
+        params.put("uniqueId", uniqueId);
+        // completion_date is terminal-owned: always write it on completion (COALESCE preserves an
+        // existing date when the caller omits one — D10).
+        params.put("completionDate", completionDate);
+        String localPathAssign = localPath != null ? "local_path = #{localPath}," : "";
+        if (localPath != null) {
+            params.put("localPath", localPath);
+        }
+        // TDLib DEDUP (see FileRepository#completeDownloadAndRetireAttempt): one completion per file,
+        // always reporting the CURRENT file. So NO per-attempt attribution — the exact-state CAS on
+        // download_status='downloading' is the whole guard. External reset-to-idle => rowCount 0
+        // (no clobber); a downloading row IS the current file finishing.
+        String updateSql = """
+                UPDATE file_record
+                SET id = #{fileId},
+                    %s
+                    completion_date = COALESCE(#{completionDate}, completion_date),
+                    download_status = 'completed'
+                WHERE unique_id = #{uniqueId}
+                  AND download_status = 'downloading'
+                """.formatted(localPathAssign);
+        // ONE transaction: complete the row AND retire its active attempt together. No separate
+        // active-attempt lookup, so no window in which a new claim could slip between a lookup and the
+        // update (bug 3 fixed). Retiring by unique_id is safe: the partial unique index guarantees at
+        // most one active attempt per unique_id, and the 'downloading' guard means that attempt is the
+        // current one.
+        return pool.withTransaction(conn ->
+                SqlTemplate.forUpdate(conn, updateSql)
+                        .execute(params)
+                        .compose(r -> {
+                            if (r.rowCount() == 0) {
+                                log.debug("completeDownloadAndRetireAttempt no-op (row not downloading) for %s"
+                                        .formatted(uniqueId));
+                                return Future.succeededFuture((JsonObject) null);
+                            }
+                            return SqlTemplate.forUpdate(conn, """
+                                            UPDATE download_attempt
+                                            SET status = 'completed', updated_at = #{now}
+                                            WHERE unique_id = #{uniqueId} AND status = 'active'
+                                            """)
+                                    .execute(MapUtil.ofEntries(
+                                            MapUtil.entry("uniqueId", uniqueId),
+                                            MapUtil.entry("now", now)
+                                    ))
+                                    .map(ignore -> {
+                                        JsonObject result = JsonObject.of().put("downloadStatus", "completed");
+                                        if (localPath != null) {
+                                            result.put("localPath", localPath);
+                                        }
+                                        if (completionDate != null) {
+                                            result.put("completionDate", completionDate);
+                                        }
+                                        return result;
+                                    });
+                        })
+        ).onFailure(err -> log.error("completeDownloadAndRetireAttempt failed for %s: %s"
+                .formatted(uniqueId, err.getMessage())));
+    }
+
+    @Override
+    public Future<Integer> retireActiveAttempts(String uniqueId) {
+        if (StrUtil.isBlank(uniqueId)) {
+            return Future.succeededFuture(0);
+        }
+        long now = System.currentTimeMillis();
+        return SqlTemplate.forUpdate(sqlClient, """
+                        UPDATE download_attempt
+                        SET status = 'retired', updated_at = #{now}
+                        WHERE unique_id = #{uniqueId} AND status = 'active'
+                        """)
+                .execute(MapUtil.ofEntries(MapUtil.entry("uniqueId", uniqueId), MapUtil.entry("now", now)))
+                .map(SqlResult::rowCount)
+                .onFailure(err -> log.error("Failed to retire active attempts for %s: %s".formatted(uniqueId, err.getMessage())));
+    }
+
+    @Override
+    public Future<Integer> retireOrphanedAttempts() {
+        long now = System.currentTimeMillis();
+        // An attempt is orphaned when it is still 'active' but its file_record is no longer
+        // 'downloading' (idle after an external reset, or a terminal state) — including the case where
+        // the file_record row is gone. Retiring it lets a fresh claim proceed without being blocked by
+        // the one-active-attempt constraint. Portable predicate: NOT EXISTS a still-downloading row
+        // (no IS DISTINCT FROM, no self-referential correlated subquery).
+        return SqlTemplate.forUpdate(sqlClient, """
+                        UPDATE download_attempt
+                        SET status = 'retired', updated_at = #{now}
+                        WHERE status = 'active'
+                          AND NOT EXISTS (
+                              SELECT 1 FROM file_record fr
+                              WHERE fr.unique_id = download_attempt.unique_id
+                                AND fr.download_status = 'downloading'
+                          )
+                        """)
+                .execute(MapUtil.ofEntries(MapUtil.entry("now", now)))
+                .map(SqlResult::rowCount)
+                .onFailure(err -> log.error("Failed to retire orphaned attempts: %s".formatted(err.getMessage())));
     }
 }

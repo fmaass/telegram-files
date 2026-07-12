@@ -59,6 +59,8 @@ public class DataVerticle extends AbstractVerticle {
                 new SettingRecord.SettingRecordDefinition(),
                 new TelegramRecord.TelegramRecordDefinition(),
                 new FileRecord.FileRecordDefinition(),
+                // download_attempt must be created AFTER file_record: its FK references file_record.
+                new DownloadAttemptRecord.DownloadAttemptDefinition(Config.isMysql()),
                 new StatisticRecord.StatisticRecordDefinition()
         );
     }
@@ -80,6 +82,11 @@ public class DataVerticle extends AbstractVerticle {
                 })
                 .compose(r ->
                         settingRepository.createOrUpdate(SettingKey.version.name(), Start.VERSION))
+                // Fail-loud backstop: both the fresh-install (getIndexes, swallows failures) and the
+                // upgrade (migration) paths attempt to create the one-active-attempt-per-unique_id
+                // partial unique index. Verify it actually exists; abort boot if it does not, so the
+                // download-attempt uniqueness guarantee can never ship silently absent.
+                .compose(r -> verifyDownloadAttemptUniqueIndex())
                 .onSuccess(r -> {
                     log.info("Database {} initialized.", Config.DB_TYPE);
                     stopPromise.complete();
@@ -87,6 +94,33 @@ public class DataVerticle extends AbstractVerticle {
                 .onFailure(err -> {
                     log.error("Failed to initialize database: %s".formatted(err.getMessage()));
                     stopPromise.fail(err);
+                });
+    }
+
+    /**
+     * Confirms the {@code download_attempt} one-active-attempt-per-unique_id partial unique index
+     * exists. The index is created via the fresh-install index path (which swallows failures) or the
+     * migration path (fail-loud); this catalog check is the authoritative fail-loud gate for BOTH.
+     */
+    private Future<Void> verifyDownloadAttemptUniqueIndex() {
+        String indexName = telegram.files.repository.DownloadAttemptRecord.ACTIVE_ATTEMPT_UNIQUE_INDEX;
+        String query;
+        if (Config.isPostgres()) {
+            query = "SELECT 1 FROM pg_indexes WHERE indexname = '%s'".formatted(indexName);
+        } else if (Config.isMysql()) {
+            query = "SELECT 1 FROM information_schema.statistics WHERE index_name = '%s' AND table_schema = DATABASE()".formatted(indexName);
+        } else {
+            query = "SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = '%s'".formatted(indexName);
+        }
+        return pool.query(query).execute()
+                .compose(rs -> {
+                    if (rs.size() == 0) {
+                        return Future.failedFuture(new IllegalStateException(
+                                "Required partial unique index '%s' (one active download_attempt per unique_id) is ABSENT after migration. "
+                                        .formatted(indexName)
+                                        + "Refusing to start: the download-claim uniqueness guarantee would not hold."));
+                    }
+                    return Future.<Void>succeededFuture();
                 });
     }
 

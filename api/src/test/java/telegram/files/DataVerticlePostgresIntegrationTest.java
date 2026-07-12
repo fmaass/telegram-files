@@ -31,12 +31,12 @@ class DataVerticlePostgresIntegrationTest extends PostgresIntegrationTest {
                 .compose(conn -> conn.query("""
                                 SELECT table_name FROM information_schema.tables
                                 WHERE table_schema = 'public'
-                                  AND table_name IN ('setting_record', 'telegram_record', 'file_record', 'statistic_record')
+                                  AND table_name IN ('setting_record', 'telegram_record', 'file_record', 'download_attempt', 'statistic_record')
                                 """).execute()
                         .compose(result -> {
                             testContext.verify(() ->
                                     Assertions.assertEquals(DataVerticle.definitions.size(), result.size(),
-                                            "All four record tables must be created on Postgres"));
+                                            "All record tables must be created on Postgres"));
                             return conn.close();
                         }))
                 .compose(v -> DataVerticle.settingRepository.<Version>getByKey(SettingKey.version))

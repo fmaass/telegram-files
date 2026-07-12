@@ -416,51 +416,66 @@ public class TelegramVerticle extends AbstractVerticle {
                                     return Future.succeededFuture(record);
                                 }
                                 
-                                // Update status to downloading before starting (if it was idle)
-                                Future<FileRecord> statusUpdateFuture;
+                                // Atomic claim: flip idle->downloading AND mint the owning active
+                                // attempt in ONE transaction. If the row is not idle (lost the race to
+                                // another worker, or an external service changed it mid-flight), the
+                                // claim returns null and we must NOT proceed — only the winner downloads.
+                                Future<String> claimFuture;
                                 if (record.isDownloadStatus(FileRecord.DownloadStatus.idle)) {
-                                    statusUpdateFuture = DataVerticle.fileRepository.updateDownloadStatus(
-                                            record.id(),
-                                            record.uniqueId(),
-                                            null,
-                                            FileRecord.DownloadStatus.downloading,
-                                            null
-                                    ).map(ignore -> record);
+                                    claimFuture = DataVerticle.fileRepository.claimForDownload(
+                                            record.id(), record.uniqueId(), getRootId());
                                 } else {
-                                    statusUpdateFuture = Future.succeededFuture(record);
+                                    // Already downloading (re-entry with a live attempt); no new claim.
+                                    claimFuture = Future.succeededFuture(null);
                                 }
-                                
-                                // Start the download
-                                return statusUpdateFuture
-                                        .compose(updatedRecord -> client.execute(new TdApi.AddFileToDownloads(fileId, chatId, messageId, 32))
-                                                .onSuccess(ignore -> {
-                                                    sendEvent(EventPayload.build(EventPayload.TYPE_FILE_STATUS, new JsonObject()
-                                                            .put("fileId", fileId)
-                                                            .put("uniqueId", updatedRecord.uniqueId())
-                                                            .put("downloadStatus", FileRecord.DownloadStatus.downloading)
-                                                    ));
 
-                                                    downloadThumbnail(chatId, messageId, fileHandler.convertThumbnailRecord(telegramRecord.id()));
-                                                })
-                                                .onFailure(err -> {
-                                                    FileRecord.DownloadStatus rollbackStatus = FileRecord.DownloadStatus.idle;
-                                                    if (err instanceof TelegramRunException tre && tre.getError().code == 404) {
-                                                        rollbackStatus = FileRecord.DownloadStatus.error;
-                                                        log.warn("[%s] AddFileToDownloads got 404 (file unavailable), marking as error: fileId=%d, uniqueId=%s"
-                                                                .formatted(getRootId(), fileId, updatedRecord.uniqueId()));
-                                                    } else {
-                                                        log.warn("[%s] AddFileToDownloads failed, rolling back to idle: %s (fileId=%d, uniqueId=%s)"
-                                                                .formatted(getRootId(), err.getMessage(), fileId, updatedRecord.uniqueId()));
-                                                    }
-                                                    DataVerticle.fileRepository.updateDownloadStatus(
-                                                            updatedRecord.id(), updatedRecord.uniqueId(), null,
-                                                            rollbackStatus, null
+                                boolean wasIdle = record.isDownloadStatus(FileRecord.DownloadStatus.idle);
+                                return claimFuture.compose(attemptId -> {
+                                    if (wasIdle && attemptId == null) {
+                                        // Lost the claim race — someone else owns this download now.
+                                        log.debug("[%s] startDownload claim lost for uniqueId=%s (not idle)"
+                                                .formatted(getRootId(), record.uniqueId()));
+                                        return Future.succeededFuture(record);
+                                    }
+                                    // Start the download
+                                    return client.execute(new TdApi.AddFileToDownloads(fileId, chatId, messageId, 32))
+                                            .onSuccess(ignore -> {
+                                                sendEvent(EventPayload.build(EventPayload.TYPE_FILE_STATUS, new JsonObject()
+                                                        .put("fileId", fileId)
+                                                        .put("uniqueId", record.uniqueId())
+                                                        .put("downloadStatus", FileRecord.DownloadStatus.downloading)
+                                                ));
+
+                                                downloadThumbnail(chatId, messageId, fileHandler.convertThumbnailRecord(telegramRecord.id()));
+                                            })
+                                            .onFailure(err -> {
+                                                FileRecord.DownloadStatus rollbackStatus = FileRecord.DownloadStatus.idle;
+                                                if (err instanceof TelegramRunException tre && tre.getError().code == 404) {
+                                                    rollbackStatus = FileRecord.DownloadStatus.error;
+                                                    log.warn("[%s] AddFileToDownloads got 404 (file unavailable), marking as error: fileId=%d, uniqueId=%s"
+                                                            .formatted(getRootId(), fileId, record.uniqueId()));
+                                                } else {
+                                                    log.warn("[%s] AddFileToDownloads failed, rolling back to idle: %s (fileId=%d, uniqueId=%s)"
+                                                            .formatted(getRootId(), err.getMessage(), fileId, record.uniqueId()));
+                                                }
+                                                // Roll back the claim we own: CAS downloading->rollback via
+                                                // the owning attempt (retires it), tolerating an external
+                                                // reset. If we did not just claim (attemptId == null), only
+                                                // retire any active attempt as a safety net.
+                                                if (attemptId != null) {
+                                                    DataVerticle.fileRepository.transitionOwned(
+                                                            record.id(), record.uniqueId(), attemptId,
+                                                            FileRecord.DownloadStatus.downloading, rollbackStatus, null, null
                                                     ).onFailure(rollbackErr ->
                                                             log.error("[%s] Rollback failed for uniqueId=%s: %s"
-                                                                    .formatted(getRootId(), updatedRecord.uniqueId(), rollbackErr.getMessage()))
+                                                                    .formatted(getRootId(), record.uniqueId(), rollbackErr.getMessage()))
                                                     );
-                                                })
-                                                .map(ignore -> updatedRecord));
+                                                } else {
+                                                    DataVerticle.fileRepository.retireActiveAttempts(record.uniqueId());
+                                                }
+                                            })
+                                            .map(ignore -> record);
+                                });
                             });
                 });
     }
@@ -934,6 +949,17 @@ public class TelegramVerticle extends AbstractVerticle {
 
         log.trace("[%s] Starting download status reconciliation".formatted(getRootId()));
 
+        // Retire orphaned active attempts: a row an external service reset downloading->idle (or that
+        // reached a terminal state without the owning worker retiring its attempt) still carries an
+        // 'active' attempt, which would block a fresh claim under the one-active-attempt constraint.
+        DataVerticle.fileRepository.retireOrphanedAttempts()
+                .onSuccess(retired -> {
+                    if (retired > 0) {
+                        log.debug("[%s] Reconciliation retired %d orphaned download attempt(s)".formatted(getRootId(), retired));
+                    }
+                })
+                .onFailure(err -> log.warn("[%s] Failed to retire orphaned attempts: %s".formatted(getRootId(), err.getMessage())));
+
         DataVerticle.fileRepository.getByDownloadStatus(telegramRecord.id(), FileRecord.DownloadStatus.downloading)
                 .onSuccess(fileRecords -> {
                     if (fileRecords == null || fileRecords.isEmpty()) {
@@ -1170,13 +1196,32 @@ public class TelegramVerticle extends AbstractVerticle {
                                 statusFuture = Future.succeededFuture(downloadStatus);
                             }
                             
-                            statusFuture.compose(finalStatus -> 
-                                DataVerticle.fileRepository.updateDownloadStatus(file.id,
+                            statusFuture.compose(finalStatus -> {
+                                // A 'completed' write is the TDLib download-finished event. TDLib DEDUPS:
+                                // one TdApi.File / one download / ONE completion per file identity
+                                // (UpdateFile carries only the file object, no attempt id — see
+                                // TdApiHelp.getDownloadStatus and the TelegramClient result handler). So a
+                                // "stale attempt1 completion distinct from attempt2's" cannot physically
+                                // occur — there is exactly one completion, reporting the current file. The
+                                // single atomic exact-state CAS (download_status='downloading' -> 'completed'
+                                // AND retire the active attempt in ONE statement) is therefore both correct
+                                // and sufficient: the 'downloading' guard makes an external reset-to-idle a
+                                // no-op (rowCount 0, no clobber); if the row is downloading it IS the current
+                                // file finishing. No per-attempt attribution is achievable OR needed.
+                                if (finalStatus == FileRecord.DownloadStatus.completed) {
+                                    return DataVerticle.fileRepository.completeDownloadAndRetireAttempt(file.id,
+                                            file.remote.uniqueId,
+                                            finalLocalPath,
+                                            finalCompletionDate);
+                                }
+                                // Non-terminal statuses (idle/paused) keep the un-owned chokepoint, which
+                                // still enforces canTransitionTo + exact-state CAS (external-reset tolerant).
+                                return DataVerticle.fileRepository.updateDownloadStatus(file.id,
                                                 file.remote.uniqueId,
                                                 finalLocalPath,
                                                 finalStatus,
-                                                finalCompletionDate)
-                            ).onSuccess(r -> {
+                                                finalCompletionDate);
+                            }).onSuccess(r -> {
                                         sendFileStatusHttpEvent(file, r);
                                         
                                         // Set file modification time to match original Telegram upload date
