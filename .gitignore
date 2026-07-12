@@ -21,3 +21,4 @@ docker-compose-*.yml
 /.env
 .DS_Store
 docs/session-reviews/
+docs/plans/
