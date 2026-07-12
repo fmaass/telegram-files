@@ -56,30 +56,124 @@ dependencies {
     testImplementation platform('org.junit:junit-bom:5.10.0')
     testImplementation 'org.junit.jupiter:junit-jupiter'
     testImplementation 'org.mockito:mockito-core:5.15.2'
+    testImplementation platform('org.testcontainers:testcontainers-bom:1.20.4')
+    testImplementation 'org.testcontainers:testcontainers'
+    testImplementation 'org.testcontainers:junit-jupiter'
+    testImplementation 'org.testcontainers:postgresql'
+    testImplementation 'org.postgresql:postgresql:42.7.4'
 }
 
-test {
+// Load key=value pairs from ../.env.test (if present) onto a test task's environment.
+def applyEnvTestFile = { testTask ->
     def envFile = file('../.env.test')
     if (envFile.exists()) {
-        doFirst {
+        testTask.doFirst {
             envFile.eachLine {
                 if (!it.startsWith("#") && !it.isEmpty()) {
                     def (key, value) = it.tokenize('=')
-                    environment key, value
+                    testTask.environment key, value
                 }
                 return
             }
         }
     }
+}
+
+test {
+    applyEnvTestFile(delegate)
     jvmArgs "-Djava.library.path=${System.getenv('TDLIB_PATH')}",
             "-XX:+EnableDynamicAgentLoading",
             "-javaagent:${configurations.testRuntimeClasspath.find { it.name.contains('mockito-core') }}"
     environment "APP_ROOT", layout.buildDirectory.dir("test-data").get().asFile.absolutePath
+    // Default suite stays on SQLite; PG-only integration tests run under pgIntegrationTest.
+    useJUnitPlatform {
+        excludeTags 'pg-integration'
+    }
     doFirst {
         jvmArgs "-Djava.class.path=${classpath.asPath}"
     }
-    useJUnitPlatform()
     finalizedBy jacocoTestReport
+}
+
+// PostgreSQL 17 integration suite.
+//
+// Config reads DB selection from System.getenv into static-final fields at class-load, and
+// JVM system properties do NOT populate System.getenv. A testcontainers Postgres whose port is
+// assigned at runtime therefore cannot be injected via -D sysprops, and a misconfigured fixture
+// would silently fall back to SQLite (false green). So this task starts a fixed-port PostgreSQL
+// 17 container BEFORE the test JVM forks, then exports the container coordinates as REAL
+// environment variables the test JVM's System.getenv sees. Each PG test asserts it actually
+// reached Postgres, so a silent SQLite fallback fails loudly.
+def pgContainerName = 'tf-pg-itest'
+def pgHostPort = '55432'
+def pgUser = 'telegram_user'
+def pgPassword = 'telegram_pass'
+def pgBootstrapDb = 'postgres'
+
+tasks.register('pgIntegrationTest', Test) {
+    description = 'Runs PostgreSQL-backed integration tests against a testcontainers Postgres 17.'
+    group = 'verification'
+    testClassesDirs = sourceSets.test.output.classesDirs
+    classpath = sourceSets.test.runtimeClasspath
+
+    applyEnvTestFile(delegate)
+    jvmArgs "-Djava.library.path=${System.getenv('TDLIB_PATH')}",
+            "-XX:+EnableDynamicAgentLoading",
+            "-javaagent:${configurations.testRuntimeClasspath.find { it.name.contains('mockito-core') }}"
+    environment "APP_ROOT", layout.buildDirectory.dir("pg-test-data").get().asFile.absolutePath
+
+    // Real env vars so Config's static-final DB fields resolve to Postgres (never sysprops).
+    environment "DB_TYPE", "postgres"
+    environment "DB_HOST", "127.0.0.1"
+    environment "DB_PORT", pgHostPort
+    environment "DB_USER", pgUser
+    environment "DB_PASSWORD", pgPassword
+    environment "DB_NAME", pgBootstrapDb
+    environment "DB_NEED_CREATE", "false"
+
+    useJUnitPlatform {
+        includeTags 'pg-integration'
+    }
+
+    doFirst {
+        jvmArgs "-Djava.class.path=${classpath.asPath}"
+
+        exec { commandLine 'docker', 'rm', '-f', pgContainerName; ignoreExitValue = true }
+        exec {
+            commandLine 'docker', 'run', '-d', '--name', pgContainerName,
+                    '-e', "POSTGRES_USER=${pgUser}",
+                    '-e', "POSTGRES_PASSWORD=${pgPassword}",
+                    '-e', "POSTGRES_DB=${pgBootstrapDb}",
+                    '-p', "${pgHostPort}:5432",
+                    'postgres:17'
+        }
+        // Block until Postgres accepts connections (pg_isready), fail loudly if it never does.
+        def ready = false
+        for (int i = 0; i < 60; i++) {
+            def probe = exec {
+                commandLine 'docker', 'exec', pgContainerName,
+                        'pg_isready', '-U', pgUser, '-d', pgBootstrapDb
+                ignoreExitValue = true
+            }
+            if (probe.exitValue == 0) { ready = true; break }
+            Thread.sleep(1000)
+        }
+        if (!ready) {
+            exec { commandLine 'docker', 'logs', pgContainerName; ignoreExitValue = true }
+            exec { commandLine 'docker', 'rm', '-f', pgContainerName; ignoreExitValue = true }
+            throw new GradleException("PostgreSQL container did not become ready on port ${pgHostPort}")
+        }
+        logger.lifecycle("PostgreSQL 17 integration container ready on 127.0.0.1:${pgHostPort}")
+    }
+
+    finalizedBy 'pgIntegrationTestCleanup'
+}
+
+// Always tear the container down, even when pgIntegrationTest fails.
+tasks.register('pgIntegrationTestCleanup') {
+    doLast {
+        exec { commandLine 'docker', 'rm', '-f', pgContainerName; ignoreExitValue = true }
+    }
 }
 
 jacocoTestReport {

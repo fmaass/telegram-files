@@ -205,10 +205,34 @@ class AvgSpeedTest {
         // Record speeds at 120 second mark
         AvgSpeed.SpeedStats stats120s = avgSpeed.getSpeedStats();
 
-        // Then
-        System.out.println("30s stats: " + stats30s);
-        System.out.println("60s stats: " + stats60s);
-        System.out.println("90s stats: " + stats90s);
-        System.out.println("120s stats: " + stats120s);
+        // Then -- assert the documented monotonic relationships across the four phases.
+        // Phase 1 (0-30s): 1MB/s cumulative steps. Phase 2 (30-60s): 2MB steps -> strictly faster.
+        // Phase 3 (60-90s): slower increments. Phase 4 (90-120s): 4MB steps -> fastest.
+
+        // Every snapshot records real, positive throughput once data is flowing.
+        assertTrue(stats30s.avgSpeed() > 0, "30s window must show positive average speed");
+        assertTrue(stats60s.avgSpeed() > 0, "60s window must show positive average speed");
+        assertTrue(stats120s.avgSpeed() > 0, "120s window must show positive average speed");
+
+        // maxSpeed is a running high-water mark: it can never decrease as faster segments arrive.
+        assertTrue(stats60s.maxSpeed() >= stats30s.maxSpeed(),
+                "maxSpeed must be monotonically non-decreasing (30s -> 60s)");
+        assertTrue(stats90s.maxSpeed() >= stats60s.maxSpeed(),
+                "maxSpeed must be monotonically non-decreasing (60s -> 90s)");
+        assertTrue(stats120s.maxSpeed() >= stats90s.maxSpeed(),
+                "maxSpeed must be monotonically non-decreasing (90s -> 120s)");
+
+        // The 4MB-step final phase is the fastest segment overall, so the final high-water mark
+        // must strictly exceed the first-phase (1MB-step) high-water mark.
+        assertTrue(stats120s.maxSpeed() > stats30s.maxSpeed(),
+                "Fastest phase (4MB steps) must push maxSpeed above the first phase (1MB steps)");
+
+        // The 2MB-step phase produces a higher window average than the 1MB-step phase.
+        assertTrue(stats60s.avgSpeed() > stats30s.avgSpeed(),
+                "Doubling the per-second increment must raise the windowed average speed");
+
+        // Interval metadata is preserved unchanged across snapshots.
+        assertEquals(60, stats30s.interval(), "SpeedStats must carry the configured interval");
+        assertEquals(60, stats120s.interval(), "SpeedStats must carry the configured interval");
     }
 }
