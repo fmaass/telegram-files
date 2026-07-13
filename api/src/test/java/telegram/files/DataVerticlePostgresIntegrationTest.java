@@ -31,7 +31,7 @@ class DataVerticlePostgresIntegrationTest extends PostgresIntegrationTest {
                 .compose(conn -> conn.query("""
                                 SELECT table_name FROM information_schema.tables
                                 WHERE table_schema = 'public'
-                                  AND table_name IN ('setting_record', 'telegram_record', 'file_record', 'download_attempt', 'statistic_record')
+                                  AND table_name IN ('setting_record', 'telegram_record', 'file_record', 'download_attempt', 'transfer_operation', 'statistic_record')
                                 """).execute()
                         .compose(result -> {
                             testContext.verify(() ->

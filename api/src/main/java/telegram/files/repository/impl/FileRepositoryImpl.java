@@ -28,6 +28,7 @@ import telegram.files.repository.FileRecord;
 import telegram.files.repository.FileRepository;
 import telegram.files.repository.SettingAutoRecords;
 import telegram.files.repository.SettingKey;
+import telegram.files.repository.TransferOperationRecord;
 import org.drinkless.tdlib.TdApi;
 
 import java.time.LocalDate;
@@ -844,6 +845,193 @@ public class FileRepositoryImpl extends AbstractSqlRepository implements FileRep
     }
 
     @Override
+    public Future<JsonObject> finalizeTransfer(String uniqueId, String localPath) {
+        if (StrUtil.isBlank(uniqueId)) {
+            return Future.succeededFuture(null);
+        }
+        if (pool == null) {
+            return Future.failedFuture(new IllegalStateException("finalizeTransfer requires a transactional Pool"));
+        }
+        // Exact-state CAS: transfer_status 'transferring' -> 'completed' (+ new local_path) in ONE
+        // statement. A crash-replay / concurrent finalize whose row already moved off 'transferring'
+        // matches no row (rowCount 0) => NO-OP, never double-applies (D6).
+        // TOCTOU guard: download_status NOT IN ('processed','imported') so an external terminal write
+        // that lands between reconciliation's select and this finalize is never clobbered.
+        Map<String, Object> params = new HashMap<>();
+        params.put("uniqueId", uniqueId);
+        String localPathAssign = "";
+        if (StrUtil.isNotBlank(localPath)) {
+            params.put("localPath", localPath);
+            localPathAssign = "local_path = #{localPath},";
+        }
+        String updateSql = """
+                UPDATE file_record
+                SET %s
+                    transfer_status = 'completed'
+                WHERE unique_id = #{uniqueId}
+                  AND transfer_status = 'transferring'
+                  AND download_status NOT IN ('processed', 'imported')
+                """.formatted(localPathAssign);
+        // ONE transaction: finalize the row AND delete its durable transfer_operation record together
+        // (the operation is done — no crash residue left to reconcile).
+        return pool.withTransaction(conn ->
+                SqlTemplate.forUpdate(conn, updateSql)
+                        .execute(params)
+                        .compose(r -> {
+                            if (r.rowCount() == 0) {
+                                log.debug("finalizeTransfer CAS no-op (not transferring, or externally terminal) for %s".formatted(uniqueId));
+                                return Future.succeededFuture((JsonObject) null);
+                            }
+                            return SqlTemplate.forUpdate(conn, """
+                                            DELETE FROM transfer_operation WHERE unique_id = #{uniqueId}
+                                            """)
+                                    .execute(Map.of("uniqueId", uniqueId))
+                                    .map(ignore -> {
+                                        JsonObject result = JsonObject.of().put("transferStatus", "completed");
+                                        if (StrUtil.isNotBlank(localPath)) {
+                                            result.put("localPath", localPath);
+                                        }
+                                        return result;
+                                    });
+                        })
+        ).onFailure(err -> log.error("finalizeTransfer failed for %s: %s".formatted(uniqueId, err.getMessage())));
+    }
+
+    @Override
+    public Future<Void> recordTransferOperation(TransferOperationRecord operation) {
+        if (operation == null || StrUtil.isBlank(operation.uniqueId())) {
+            return Future.succeededFuture();
+        }
+        // Upsert on unique_id. Portable: DELETE-then-INSERT in one transaction (avoids dialect-specific
+        // ON CONFLICT / ON DUPLICATE KEY syntax across SQLite/Postgres/MySQL).
+        if (pool == null) {
+            return Future.failedFuture(new IllegalStateException("recordTransferOperation requires a transactional Pool"));
+        }
+        Map<String, Object> params = new HashMap<>();
+        params.put("uniqueId", operation.uniqueId());
+        params.put("finalDestPath", operation.finalDestPath());
+        params.put("stagingTempPath", operation.stagingTempPath());
+        params.put("sourcePath", operation.sourcePath());
+        params.put("sourceSize", operation.sourceSize());
+        params.put("overwritePolicy", operation.overwritePolicy());
+        params.put("createdAt", operation.createdAt() != null ? operation.createdAt() : System.currentTimeMillis());
+        return pool.withTransaction(conn ->
+                SqlTemplate.forUpdate(conn, "DELETE FROM transfer_operation WHERE unique_id = #{uniqueId}")
+                        .execute(Map.of("uniqueId", operation.uniqueId()))
+                        .compose(ignore -> SqlTemplate.forUpdate(conn, """
+                                        INSERT INTO transfer_operation
+                                            (unique_id, final_dest_path, staging_temp_path, source_path, source_size, overwrite_policy, created_at)
+                                        VALUES
+                                            (#{uniqueId}, #{finalDestPath}, #{stagingTempPath}, #{sourcePath}, #{sourceSize}, #{overwritePolicy}, #{createdAt})
+                                        """)
+                                .execute(params))
+                        .<Void>mapEmpty()
+        ).onFailure(err -> log.error("recordTransferOperation failed for %s: %s".formatted(operation.uniqueId(), err.getMessage())));
+    }
+
+    @Override
+    public Future<TransferOperationRecord> getTransferOperation(String uniqueId) {
+        if (StrUtil.isBlank(uniqueId)) {
+            return Future.succeededFuture(null);
+        }
+        return SqlTemplate
+                .forQuery(sqlClient, "SELECT * FROM transfer_operation WHERE unique_id = #{uniqueId}")
+                .mapTo(TransferOperationRecord.ROW_MAPPER)
+                .execute(Map.of("uniqueId", uniqueId))
+                .map(rs -> rs.size() > 0 ? rs.iterator().next() : null)
+                .onFailure(err -> log.error("getTransferOperation failed for %s: %s".formatted(uniqueId, err.getMessage())));
+    }
+
+    @Override
+    public Future<Void> deleteTransferOperation(String uniqueId) {
+        if (StrUtil.isBlank(uniqueId)) {
+            return Future.succeededFuture();
+        }
+        return SqlTemplate
+                .forUpdate(sqlClient, "DELETE FROM transfer_operation WHERE unique_id = #{uniqueId}")
+                .execute(Map.of("uniqueId", uniqueId))
+                .<Void>mapEmpty()
+                .onFailure(err -> log.error("deleteTransferOperation failed for %s: %s".formatted(uniqueId, err.getMessage())));
+    }
+
+    @Override
+    public Future<List<FileRecord>> getStuckTransfers() {
+        // At boot the single-threaded TransferVerticle is not yet running, so any 'transferring' row is
+        // the residue of a crashed transfer. Return them for per-row filesystem classification (a blanket
+        // reset would misclassify a crash-AFTER-rename as a loss). download_status='completed' guard
+        // excludes processed/imported (external-owned).
+        return SqlTemplate
+                .forQuery(sqlClient, """
+                        SELECT * FROM file_record
+                        WHERE transfer_status = 'transferring'
+                          AND download_status = 'completed'
+                        """)
+                .mapTo(FileRecord.ROW_MAPPER)
+                .execute(Map.of())
+                .map(IterUtil::toList)
+                .onFailure(err -> log.error("getStuckTransfers failed: %s".formatted(err.getMessage())));
+    }
+
+    @Override
+    public Future<Boolean> resetTransferToIdle(String uniqueId) {
+        if (StrUtil.isBlank(uniqueId)) {
+            return Future.succeededFuture(false);
+        }
+        // Exact-state CAS: transfer_status 'transferring' -> 'idle'. download_status='completed' guard
+        // means this can never touch processed/imported. Used for retry-transfer (NOT re-download).
+        return SqlTemplate
+                .forUpdate(sqlClient, """
+                        UPDATE file_record
+                        SET transfer_status = 'idle'
+                        WHERE unique_id = #{uniqueId}
+                          AND transfer_status = 'transferring'
+                          AND download_status = 'completed'
+                        """)
+                .execute(Map.of("uniqueId", uniqueId))
+                .map(r -> r.rowCount() > 0)
+                .onFailure(err -> log.error("resetTransferToIdle failed for %s: %s".formatted(uniqueId, err.getMessage())));
+    }
+
+    @Override
+    public Future<Integer> requeueCompletedMissingArtifact(List<String> uniqueIdsWithMissingArtifact) {
+        if (CollUtil.isEmpty(uniqueIdsWithMissingArtifact)) {
+            return Future.succeededFuture(0);
+        }
+        String inClause = IntStream.range(0, uniqueIdsWithMissingArtifact.size())
+                .mapToObj(i -> "#{uid" + i + "}")
+                .collect(Collectors.joining(", "));
+        Map<String, Object> params = new HashMap<>();
+        for (int i = 0; i < uniqueIdsWithMissingArtifact.size(); i++) {
+            params.put("uid" + i, uniqueIdsWithMissingArtifact.get(i));
+        }
+        // Recovery reset: completed-but-missing (verified absent by caller) -> idle so it re-downloads.
+        // download_status='completed' guard makes this a NO-OP on processed/imported/idle rows even if a
+        // stale unique_id is passed (defence-in-depth: never touch external-owned terminal states).
+        // Also clear the download artifact bookkeeping (local_path, completion_date, start_date,
+        // downloaded_size) so the re-download starts clean and the reset-stuck signature matches §4.
+        return SqlTemplate
+                .forUpdate(sqlClient, """
+                        UPDATE file_record
+                        SET download_status = 'idle',
+                            transfer_status = 'idle',
+                            local_path = NULL,
+                            completion_date = NULL,
+                            start_date = NULL,
+                            downloaded_size = 0
+                        WHERE unique_id IN (%s)
+                          AND download_status = 'completed'
+                        """.formatted(inClause))
+                .execute(params)
+                .map(SqlResult::rowCount)
+                .onSuccess(n -> {
+                    if (n > 0) {
+                        log.info("Recovery re-queued %d completed-but-missing file(s) for re-download".formatted(n));
+                    }
+                })
+                .onFailure(err -> log.error("requeueCompletedMissingArtifact failed: %s".formatted(err.getMessage())));
+    }
+
+    @Override
     public Future<Void> updateFileId(int fileId, String uniqueId) {
         if (fileId <= 0 || StrUtil.isBlank(uniqueId)) {
             return Future.succeededFuture();
@@ -935,8 +1123,8 @@ public class FileRepositoryImpl extends AbstractSqlRepository implements FileRep
         if (StrUtil.isBlank(uniqueId)) {
             return Future.succeededFuture();
         }
-        // Application-enforced CASCADE: download_attempt has no SQL FK (concurrent createTable +
-        // file_record's PK-swap migration preclude one), so clear its attempts here.
+        // Application-enforced CASCADE: download_attempt and transfer_operation have no SQL FK
+        // (concurrent createTable + file_record's PK-swap migration preclude one), so clear them here.
         return SqlTemplate
                 .forUpdate(sqlClient, """
                         DELETE FROM download_attempt WHERE unique_id = #{uniqueId}
@@ -946,6 +1134,15 @@ public class FileRepositoryImpl extends AbstractSqlRepository implements FileRep
                     log.warn("Failed to delete download attempts for %s: %s".formatted(uniqueId, err.getMessage()));
                     return Future.succeededFuture(null);
                 })
+                .compose(ignore -> SqlTemplate
+                        .forUpdate(sqlClient, """
+                                DELETE FROM transfer_operation WHERE unique_id = #{uniqueId}
+                                """)
+                        .execute(Map.of("uniqueId", uniqueId))
+                        .recover(err -> {
+                            log.warn("Failed to delete transfer operation for %s: %s".formatted(uniqueId, err.getMessage()));
+                            return Future.succeededFuture(null);
+                        }))
                 .compose(ignore -> SqlTemplate
                         .forUpdate(sqlClient, """
                                 DELETE FROM file_record WHERE unique_id = #{uniqueId}

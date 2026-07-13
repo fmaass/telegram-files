@@ -120,6 +120,87 @@ public interface FileRepository {
                                             FileRecord.TransferStatus transferStatus,
                                             String localPath);
 
+    /**
+     * Crash-atomic transfer FINALIZE (D6). Exact-state CAS: flip {@code transfer_status
+     * 'transferring' -> 'completed'} AND set the new {@code local_path} in ONE statement, guarded by
+     * {@code WHERE transfer_status='transferring' AND download_status NOT IN ('processed','imported')}.
+     * A crash-replay or a concurrent worker that tries to finalize a row whose {@code transfer_status}
+     * already moved off {@code transferring} matches no row (rowCount 0) and is a NO-OP.
+     * <p>
+     * The {@code download_status NOT IN ('processed','imported')} guard closes a TOCTOU: between
+     * reconciliation selecting a stuck row and finalizing it, an external service can advance
+     * {@code download_status} to {@code processed}/{@code imported}; the guard makes the finalize a
+     * no-op in that window so a concurrent external terminal write is never clobbered (never-downgrade).
+     * On finalize the row's {@code transfer_operation} durable record is DELETED in the same
+     * transaction (the operation is done — no crash residue to reconcile).
+     * <p>
+     * This is the DB half of the durable-transfer sequence: the caller has already atomically renamed
+     * the artifact onto {@code localPath} and fsynced the destination directory BEFORE calling this.
+     *
+     * @return the applied change ({@code transferStatus}/{@code localPath}) or {@code null} on a
+     * no-op CAS.
+     */
+    Future<JsonObject> finalizeTransfer(String uniqueId, String localPath);
+
+    /**
+     * Persist the durable {@link TransferOperationRecord} for an in-flight transfer BEFORE its atomic
+     * rename (upsert on {@code unique_id}). Reconciliation reads this to reconcile from PERSISTED
+     * TRUTH — the exact destination path chosen (incl. RENAME suffix), the staging temp, and whether
+     * the source was consumed by a same-FS move — instead of recomputing a canonical path.
+     */
+    Future<Void> recordTransferOperation(TransferOperationRecord operation);
+
+    /** The persisted in-flight {@link TransferOperationRecord} for {@code uniqueId}, or {@code null}. */
+    Future<TransferOperationRecord> getTransferOperation(String uniqueId);
+
+    /** Delete the persisted transfer-operation record for {@code uniqueId} (idempotent). */
+    Future<Void> deleteTransferOperation(String uniqueId);
+
+    /**
+     * Startup transfer reconciliation (D6): fetch every {@code file_record} stuck in
+     * {@code transfer_status='transferring'} whose {@code download_status='completed'}. On a clean boot
+     * NO transfer is in flight (the single-threaded {@link telegram.files.TransferVerticle} is not yet
+     * running), so any such row is the residue of a transfer that crashed mid-flight. The caller
+     * inspects the ACTUAL filesystem per row to classify (recover-forward vs retry-transfer vs
+     * re-download) — a blanket reset would misclassify a crash-AFTER-rename (file safely at the
+     * destination) as a loss. Only {@code download_status='completed'} rows are returned (never
+     * {@code processed}/{@code imported}, which are external-owned and past transfer).
+     *
+     * @return the stuck-transferring rows for per-row filesystem classification.
+     */
+    Future<List<FileRecord>> getStuckTransfers();
+
+    /**
+     * Reset a single row's {@code transfer_status='transferring' -> 'idle'} (exact-state CAS) so the
+     * idempotent transfer re-runs. Used by startup reconciliation for the retry-transfer cases (b/c):
+     * the download artifact or a dest-local temp still exists, so the file must be (re-)transferred,
+     * NOT re-downloaded. Guarded on {@code download_status='completed'} so it can never touch
+     * {@code processed}/{@code imported}.
+     *
+     * @return true iff exactly one transferring row was reset.
+     */
+    Future<Boolean> resetTransferToIdle(String uniqueId);
+
+    /**
+     * Startup recovery (D6/invariant conflict resolution): make {@code completed}-but-missing rows
+     * recoverable. A row that is {@code download_status='completed'} with an ABSENT artifact
+     * (local_path NULL/blank or the file does not exist on disk) and is NOT {@code processed}/
+     * {@code imported} is a genuine data loss — the previous behavior silently preserved a
+     * completed-but-gone row. The explicit policy is to re-queue it for re-download by resetting to
+     * {@code idle} (respecting the state machine's {@code completed -> ...} legality is bypassed here
+     * intentionally: this is a recovery reset, analogous to the external reset-stuck flow). Rows whose
+     * artifact IS present are left untouched. {@code processed}/{@code imported} rows are NEVER
+     * touched (external-owned).
+     * <p>
+     * The artifact-presence check cannot be done in SQL (the DB has no filesystem view), so the caller
+     * supplies the list of {@code unique_id}s whose artifact it has already verified absent.
+     *
+     * @param uniqueIdsWithMissingArtifact unique_ids confirmed (by the caller, on disk) to have a
+     *                                     missing artifact while still {@code completed}.
+     * @return number of rows re-queued to idle.
+     */
+    Future<Integer> requeueCompletedMissingArtifact(List<String> uniqueIdsWithMissingArtifact);
+
     Future<Void> updateFileId(int fileId, String uniqueId);
 
     Future<Integer> updateAlbumDataByMediaAlbumId(long mediaAlbumId, String caption, long reactionCount);

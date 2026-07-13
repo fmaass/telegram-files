@@ -61,6 +61,9 @@ public class DataVerticle extends AbstractVerticle {
                 new FileRecord.FileRecordDefinition(),
                 // download_attempt must be created AFTER file_record: its FK references file_record.
                 new DownloadAttemptRecord.DownloadAttemptDefinition(Config.isMysql()),
+                // transfer_operation: additive durable record of an in-flight transfer's outcome paths
+                // + source-consumed fact, so reconciliation reconciles from persisted truth (Phase 3).
+                new TransferOperationRecord.TransferOperationDefinition(),
                 new StatisticRecord.StatisticRecordDefinition()
         );
     }

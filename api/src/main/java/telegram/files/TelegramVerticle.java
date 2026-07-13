@@ -999,13 +999,17 @@ public class TelegramVerticle extends AbstractVerticle {
                                                 .formatted(getRootId(), staleZombie ? "stale" : "fresh", targetStatus, fileRecord.uniqueId(), fileRecord.id()));
                                         reconciledCount[0]++;
 
+                                        // D8: surface the write failure (do not fire-and-forget). A zombie
+                                        // reconciliation write that silently fails leaves the row stuck
+                                        // 'downloading' forever; log it so the failure is visible.
                                         DataVerticle.fileRepository.updateDownloadStatus(
                                                 fileRecord.id(),
                                                 fileRecord.uniqueId(),
                                                 null,
                                                 targetStatus,
                                                 null
-                                        );
+                                        ).onFailure(err -> log.error("[%s] Reconciliation: failed to set zombie %s to %s: %s"
+                                                .formatted(getRootId(), fileRecord.uniqueId(), targetStatus, err.getMessage())));
                                     }
                                 })
                                 .onFailure(e -> {
@@ -1014,13 +1018,15 @@ public class TelegramVerticle extends AbstractVerticle {
                                             .formatted(getRootId(), fileRecord.uniqueId(), fileRecord.id()));
                                     reconciledCount[0]++;
 
+                                    // D8: surface the write failure (do not fire-and-forget).
                                     DataVerticle.fileRepository.updateDownloadStatus(
                                             fileRecord.id(),
                                             fileRecord.uniqueId(),
                                             null,
                                             FileRecord.DownloadStatus.error,
                                             null
-                                    );
+                                    ).onFailure(err -> log.error("[%s] Reconciliation: failed to set unknown-to-TDLib %s to error: %s"
+                                            .formatted(getRootId(), fileRecord.uniqueId(), err.getMessage())));
                                 });
                     });
 
@@ -1385,50 +1391,50 @@ public class TelegramVerticle extends AbstractVerticle {
                             continue;
                         }
                         
+                        // A row mid-transfer (transfer_status='transferring') is a crashed transfer owned
+                        // by TransferVerticle's filesystem-truth reconciliation, which may recover it
+                        // FORWARD (the file is safely at the destination). Do NOT classify it as a loss or
+                        // re-download it here — that would misclassify a SUCCESSFUL crash-after-rename
+                        // transfer. Leave it for the transfer reconciler.
+                        if (fileRecord.isTransferStatus(FileRecord.TransferStatus.transferring)) {
+                            log.debug("[%s] Skipping mid-transfer row in completed-sync (owned by transfer reconciliation): %s"
+                                    .formatted(getRootId(), fileRecord.uniqueId()));
+                            synced.incrementAndGet();
+                            checkSyncComplete(processed.incrementAndGet(), completedFiles.size(), synced.get(), notFound.get());
+                            continue;
+                        }
+
                         // Check if file exists on disk
                         if (StrUtil.isBlank(fileRecord.localPath()) || !FileUtil.exist(fileRecord.localPath())) {
-                            // File marked as completed but doesn't exist
-                            // Preserve "completed" status for files that were downloaded in the past
-                            // (user may have moved/deleted the file, but we want to preserve the "Downloaded" status)
-                            Long completionDate = fileRecord.completionDate();
-                            if (completionDate == null || completionDate == 0) {
-                                // File doesn't have completionDate - set one based on file date or use a reasonable default
-                                // Use the file's date (when it was sent) as a proxy for when it was downloaded
-                                // This ensures older downloads without completionDate still show as "Downloaded"
-                                if (fileRecord.date() > 0) {
-                                    // Use file date converted to milliseconds (file.date is in seconds)
-                                    completionDate = fileRecord.date() * 1000L;
-                                } else {
-                                    // Fallback: use a timestamp from the past (e.g., 1 year ago)
-                                    // This ensures it shows as "Downloaded" (before current session)
-                                    completionDate = System.currentTimeMillis() - (365L * 24 * 60 * 60 * 1000);
-                                }
-                                // Update the record to set completionDate so it persists
-                                DataVerticle.fileRepository.updateDownloadStatus(
-                                        fileRecord.id(),
-                                        fileRecord.uniqueId(),
-                                        fileRecord.localPath(), // Keep existing path even though file is gone
-                                        FileRecord.DownloadStatus.completed,
-                                        completionDate
-                                ).onSuccess(r -> {
-                                    log.debug("[%s] Set completionDate for deleted file (preserving 'Downloaded' status): %s"
-                                            .formatted(getRootId(), fileRecord.uniqueId()));
-                                    synced.incrementAndGet();
-                                    checkSyncComplete(processed.incrementAndGet(), completedFiles.size(), synced.get(), notFound.get());
-                                })
-                                .onFailure(e -> {
-                                    log.debug("[%s] Failed to set completionDate for deleted file: %s"
-                                            .formatted(getRootId(), e.getMessage()));
-                                    synced.incrementAndGet();
-                                    checkSyncComplete(processed.incrementAndGet(), completedFiles.size(), synced.get(), notFound.get());
-                                });
-                            } else {
-                                // File already has completionDate - keep status as completed
-                                log.debug("[%s] File was downloaded in the past but not found on disk (likely moved/deleted) - keeping as completed: %s"
-                                        .formatted(getRootId(), fileRecord.uniqueId()));
-                                synced.incrementAndGet();
-                                checkSyncComplete(processed.incrementAndGet(), completedFiles.size(), synced.get(), notFound.get());
-                            }
+                            // COMPLETED-BUT-MISSING RECOVERY POLICY (Phase 3, D6 invariant resolution).
+                            // A row that is download_status='completed' (download reported done) whose
+                            // artifact is ABSENT, is NOT mid-transfer (guarded above), and is NOT
+                            // processed/imported, is a GENUINE LOSS: the file the DB claims to hold does not
+                            // exist. The prior behavior silently PRESERVED such a completed-but-gone row
+                            // (backfilling a completion_date), which hid the loss forever. The explicit
+                            // policy is to make it RECOVERABLE: re-queue for re-download (reset to idle).
+                            //
+                            // processed/imported are NEVER touched here: syncCompletedFilesStatus filters
+                            // download_status='completed' (line above), so those external-owned terminal
+                            // rows are never even loaded; requeueCompletedMissingArtifact additionally
+                            // guards download_status='completed' as defence-in-depth. A row the user
+                            // deliberately moved out of the inbox reaches 'processed' via the external
+                            // pipeline and is thus excluded — only a still-'completed' row with a vanished
+                            // artifact (never transferred/processed) is re-queued.
+                            log.warn("[%s] Completed-but-missing artifact (genuine loss) - re-queuing for re-download: %s (path=%s)"
+                                    .formatted(getRootId(), fileRecord.uniqueId(), fileRecord.localPath()));
+                            DataVerticle.fileRepository.requeueCompletedMissingArtifact(List.of(fileRecord.uniqueId()))
+                                    .onSuccess(n -> {
+                                        synced.incrementAndGet();
+                                        checkSyncComplete(processed.incrementAndGet(), completedFiles.size(), synced.get(), notFound.get());
+                                    })
+                                    .onFailure(e -> {
+                                        // Surface the failure (do not swallow): a completed-but-missing row
+                                        // that could not be re-queued remains a silent loss until next boot.
+                                        log.error("[%s] Failed to re-queue completed-but-missing file %s: %s"
+                                                .formatted(getRootId(), fileRecord.uniqueId(), e.getMessage()));
+                                        checkSyncComplete(processed.incrementAndGet(), completedFiles.size(), synced.get(), notFound.get());
+                                    });
                             continue;
                         }
                         

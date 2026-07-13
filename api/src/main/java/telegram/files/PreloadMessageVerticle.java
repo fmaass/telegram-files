@@ -135,7 +135,12 @@ public class PreloadMessageVerticle extends AbstractVerticle {
                                 TdApi.MessageThreadInfo messageThreadInfo = result.resultAt(1);
                                 TdApiHelp.getFileHandler(message).ifPresent(fileHandler -> {
                                     FileRecord fileRecord = fileHandler.convertFileRecord(telegramId).withThreadInfo(messageThreadInfo);
-                                    DataVerticle.fileRepository.createIfNotExist(fileRecord);
+                                    // D8: surface the write failure (do not fire-and-forget). A dropped
+                                    // preload insert silently loses a discovered file so it is never
+                                    // queued for download; log the failure so it is visible.
+                                    DataVerticle.fileRepository.createIfNotExist(fileRecord)
+                                            .onFailure(err -> log.error("Preload: failed to persist discovered file %s: %s"
+                                                    .formatted(fileRecord.uniqueId(), err.getMessage())));
                                 });
                             })
                             .onFailure(e -> log.error("Preload message fail. Get message failed: %s".formatted(e.getMessage())));

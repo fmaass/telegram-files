@@ -325,17 +325,17 @@ public class DataVerticleMigrationTest {
         if (Config.isPostgres()) {
             getTablesQuery = """
                     SELECT table_name FROM information_schema.tables
-                    WHERE table_schema = 'public' AND table_name IN ('setting_record', 'telegram_record', 'file_record', 'download_attempt', 'statistic_record')
+                    WHERE table_schema = 'public' AND table_name IN ('setting_record', 'telegram_record', 'file_record', 'download_attempt', 'transfer_operation', 'statistic_record')
                     """;
         } else if (Config.isMysql()) {
             getTablesQuery = """
                     SELECT table_name FROM information_schema.tables
-                    WHERE table_schema = DATABASE() AND table_name IN ('setting_record', 'telegram_record', 'file_record', 'download_attempt', 'statistic_record')
+                    WHERE table_schema = DATABASE() AND table_name IN ('setting_record', 'telegram_record', 'file_record', 'download_attempt', 'transfer_operation', 'statistic_record')
                     """;
         } else {
             getTablesQuery = """
                     SELECT name FROM sqlite_master
-                    WHERE type='table' AND name IN ('setting_record', 'telegram_record', 'file_record', 'download_attempt', 'statistic_record')
+                    WHERE type='table' AND name IN ('setting_record', 'telegram_record', 'file_record', 'download_attempt', 'transfer_operation', 'statistic_record')
                     """;
         }
         return getTablesQuery;

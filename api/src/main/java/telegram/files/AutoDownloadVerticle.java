@@ -388,9 +388,14 @@ public class AutoDownloadVerticle extends AbstractVerticle {
                         if (e instanceof TelegramRunException tre && tre.getError().code == 404) {
                             log.warn("Message deleted, marking as error: DB ID=%d, ChatId=%d, MsgId=%d"
                                     .formatted(fileRecord.id(), fileRecord.chatId(), fileRecord.messageId()));
+                            // D8: surface the write failure (do not fire-and-forget). If this error-mark
+                            // silently fails the row stays 'idle'/'downloading' and is retried forever
+                            // against a deleted message.
                             DataVerticle.fileRepository.updateDownloadStatus(
                                     fileRecord.id(), fileRecord.uniqueId(), null,
-                                    FileRecord.DownloadStatus.error, null);
+                                    FileRecord.DownloadStatus.error, null)
+                                    .onFailure(err -> log.error("Failed to mark deleted-message file %s as error: %s"
+                                            .formatted(fileRecord.uniqueId(), err.getMessage())));
                         } else {
                             log.error("Download failed: ChatId=%d MsgId=%d DB ID=%d — %s"
                                     .formatted(fileRecord.chatId(), fileRecord.messageId(), fileRecord.id(), e.getMessage()));
