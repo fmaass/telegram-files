@@ -1359,18 +1359,46 @@ public class FileRepositoryImpl extends AbstractSqlRepository implements FileRep
 
     @Override
     public Future<String> claimForDownload(int fileId, String uniqueId, String leaseOwner) {
+        // The idle-only claim is exactly the generalized claim restricted to {idle}, and it must NOT
+        // retire a pre-existing active attempt (a lingering one means a concurrent claim is in flight
+        // and THIS call must lose — the idle single-winner invariant).
+        return claimForDownloadFrom(fileId, uniqueId, leaseOwner,
+                java.util.Set.of(FileRecord.DownloadStatus.idle), false);
+    }
+
+    @Override
+    public Future<String> claimForDownloadFrom(int fileId, String uniqueId, String leaseOwner,
+                                               java.util.Set<FileRecord.DownloadStatus> legalFromStates,
+                                               boolean retireExistingActive) {
         if (StrUtil.isBlank(uniqueId)) {
             return Future.succeededFuture(null);
+        }
+        if (legalFromStates == null || legalFromStates.isEmpty()) {
+            return Future.succeededFuture(null);
+        }
+        // Every from-state must legally transition to downloading (defense-in-depth; the boundary
+        // guard also checks canTransitionTo). Reject an illegal predecessor rather than claim from it.
+        for (FileRecord.DownloadStatus from : legalFromStates) {
+            if (from != FileRecord.DownloadStatus.downloading
+                && !from.canTransitionTo(FileRecord.DownloadStatus.downloading)) {
+                return Future.failedFuture(new IllegalArgumentException(
+                        "claimForDownloadFrom: %s cannot transition to downloading".formatted(from)));
+            }
         }
         if (pool == null) {
             return Future.failedFuture(new IllegalStateException(
                     "claimForDownload requires a transactional Pool; repository was constructed with a non-Pool client"));
         }
+        // Build the IN-list from the ENUM names only (never user input) — SQL-injection-safe whitelist.
+        String inList = legalFromStates.stream()
+                .map(s -> "'" + s.name() + "'")
+                .collect(java.util.stream.Collectors.joining(", "));
         String attemptId = java.util.UUID.randomUUID().toString();
         long now = System.currentTimeMillis();
-        // ONE transaction: exact-state CAS idle->downloading AND INSERT the owning active attempt.
-        // Both-or-neither. The partial unique index (one active attempt per unique_id) makes the
-        // INSERT fail if another active attempt exists, rolling the whole claim back.
+        // ONE transaction: exact-state CAS (download_status IN legalFromStates)->downloading AND INSERT
+        // the owning active attempt. Both-or-neither. The partial unique index (one active attempt per
+        // unique_id) makes the INSERT fail if another active attempt exists, rolling the whole claim
+        // back — so two concurrent claims (idle OR paused/error re-download) yield exactly one winner.
         return pool.withTransaction(conn ->
                 SqlTemplate.forUpdate(conn, """
                                 UPDATE file_record
@@ -1378,8 +1406,8 @@ public class FileRepositoryImpl extends AbstractSqlRepository implements FileRep
                                     id = #{fileId},
                                     start_date = #{now},
                                     queued_at = COALESCE(queued_at, #{now})
-                                WHERE unique_id = #{uniqueId} AND download_status = 'idle'
-                                """)
+                                WHERE unique_id = #{uniqueId} AND download_status IN (%s)
+                                """.formatted(inList))
                         .execute(MapUtil.ofEntries(
                                 MapUtil.entry("fileId", fileId),
                                 MapUtil.entry("uniqueId", uniqueId),
@@ -1387,11 +1415,26 @@ public class FileRepositoryImpl extends AbstractSqlRepository implements FileRep
                         ))
                         .compose(r -> {
                             if (r.rowCount() == 0) {
-                                // Not idle (already claimed / terminal / externally reset mid-claim).
-                                // Roll back by failing the transaction with a sentinel; caller sees null.
+                                // Not in a claimable state (already claimed / terminal / externally reset
+                                // mid-claim). Roll back with a sentinel; caller sees null.
                                 return Future.failedFuture(new ClaimNotIdleException());
                             }
-                            return SqlTemplate.forUpdate(conn, """
+                            // For a paused/error RE-download, retire the row's own lingering active
+                            // attempt WITHIN this transaction (gated by the file_record CAS above, so only
+                            // the single winner reaches here) BEFORE minting the fresh one — otherwise the
+                            // one-active-attempt index would reject the INSERT and roll the claim back.
+                            Future<Void> retireFirst = retireExistingActive
+                                    ? SqlTemplate.forUpdate(conn, """
+                                            UPDATE download_attempt
+                                            SET status = 'retired', updated_at = #{now}
+                                            WHERE unique_id = #{uniqueId} AND status = 'active'
+                                            """)
+                                    .execute(MapUtil.ofEntries(
+                                            MapUtil.entry("uniqueId", uniqueId),
+                                            MapUtil.entry("now", now)
+                                    )).mapEmpty()
+                                    : Future.succeededFuture();
+                            return retireFirst.compose(v -> SqlTemplate.forUpdate(conn, """
                                             INSERT INTO download_attempt
                                                 (attempt_id, unique_id, lease_owner, lease_expires_at, status, created_at, updated_at)
                                             VALUES
@@ -1403,11 +1446,11 @@ public class FileRepositoryImpl extends AbstractSqlRepository implements FileRep
                                             MapUtil.entry("leaseOwner", leaseOwner),
                                             MapUtil.entry("now", now)
                                     ))
-                                    .map(attemptId);
+                                    .map(attemptId));
                         })
         ).recover(err -> {
             if (err instanceof ClaimNotIdleException) {
-                log.debug("claimForDownload no-op (not idle) for %s".formatted(uniqueId));
+                log.debug("claimForDownload no-op (not claimable) for %s".formatted(uniqueId));
                 return Future.succeededFuture(null);
             }
             // A duplicate-active-attempt unique violation also means "someone else owns the claim".

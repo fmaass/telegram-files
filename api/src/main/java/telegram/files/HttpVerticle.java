@@ -19,13 +19,11 @@ import io.vertx.core.http.HttpServerResponse;
 import io.vertx.core.json.Json;
 import io.vertx.core.json.JsonArray;
 import io.vertx.core.json.JsonObject;
-import io.vertx.ext.healthchecks.HealthChecks;
 import io.vertx.ext.web.Router;
 import io.vertx.ext.web.RoutingContext;
 import io.vertx.ext.web.handler.BodyHandler;
 import io.vertx.ext.web.handler.CorsHandler;
 import io.vertx.ext.web.handler.SessionHandler;
-import io.vertx.ext.web.healthchecks.HealthCheckHandler;
 import io.vertx.ext.web.sstore.LocalSessionStore;
 import io.vertx.ext.web.sstore.SessionStore;
 import org.drinkless.tdlib.TdApi;
@@ -199,48 +197,40 @@ public class HttpVerticle extends AbstractVerticle {
                     );
         }
 
-        HealthChecks hc = HealthChecks.create(vertx);
-        hc.register("http-server", Promise::complete);
+        // Resource-oriented composition (Phase-5). Every route is wired by a per-resource group
+        // method onto BOTH the root router (the DEPRECATED aliases the frontend still calls) and a
+        // `/api` sub-router (the new resource surface). Because the SAME handler backs a path and its
+        // `/api` twin, the two are guaranteed behavior-identical (alias parity is structural, not
+        // duplicated). The infra routes (`/`, `/version`, `/health`, `/metrics`, `/ws`, settings and
+        // the guarded `/telegram/api/*` passthrough) are likewise mounted on both.
+        Router apiRouter = Router.router(vertx);
 
-        router.get("/").handler(ctx -> ctx.response().end("Hello World!"));
-        router.get("/health").handler(HealthCheckHandler.createWithHealthChecks(hc));
-        router.get("/version").handler(ctx -> ctx.json(new JsonObject().put("version", Start.VERSION)));
-        router.route("/ws").handler(this::handleWebSocket);
+        mountInfraRoutes(router);
+        mountInfraRoutes(apiRouter);
+        mountAccountRoutes(router);
+        mountAccountRoutes(apiRouter);
+        mountChatRoutes(router);
+        mountChatRoutes(apiRouter);
+        mountFileRoutes(router);
+        mountFileRoutes(apiRouter);
+        mountDownloadRoutes(router);
+        mountDownloadRoutes(apiRouter);
+        mountAutomationRoutes(router);
+        mountAutomationRoutes(apiRouter);
 
-        router.get("/settings").handler(this::handleSettings);
-        router.post("/settings/create").handler(this::handleSettingsCreate);
+        // New resource-oriented download surface (only under /api). No legacy twin — these are new.
+        apiRouter.post("/downloads").handler(telegram.files.http.ApiResourceHandlers::triggerDownload);
+        apiRouter.post("/downloads:batch").handler(telegram.files.http.ApiResourceHandlers::triggerDownloadBatch);
+        apiRouter.post("/files/:uniqueId/pause").handler(telegram.files.http.ApiResourceHandlers::pause);
+        apiRouter.post("/files/:uniqueId/resume").handler(telegram.files.http.ApiResourceHandlers::resume);
+        apiRouter.post("/files/:uniqueId/cancel").handler(telegram.files.http.ApiResourceHandlers::cancel);
+        apiRouter.delete("/files/:uniqueId").handler(telegram.files.http.ApiResourceHandlers::remove);
 
-        router.post("/telegram/create").handler(this::handleTelegramCreate);
-        router.post("/telegram/:telegramId/delete").handler(this::handleTelegramDelete);
-        router.get("/telegram/api/methods").handler(this::handleTelegramApiMethods);
-        router.get("/telegram/api/:method/parameters").handler(this::handleTelegramApiMethodParameters);
-        router.post("/telegram/api/:method").handler(this::handleTelegramApi);
-        router.get("/telegrams").handler(this::handleTelegrams);
-        router.get("/telegram/:telegramId/chats").handler(this::handleTelegramChats);
-        router.get("/telegram/:telegramId/chat/:chatId/files").handler(this::handleTelegramFiles);
-        router.get("/telegram/:telegramId/chat/:chatId/files/count").handler(this::handleTelegramFilesCount);
-        router.get("/telegram/:telegramId/chat/:chatId/statistics").handler(this::handleTelegramChatDownloadStatistics);
-        router.get("/telegram/:telegramId/download-statistics").handler(this::handleTelegramDownloadStatistics);
-        router.post("/telegrams/change").handler(this::handleTelegramChange);
-        router.post("/telegram/:telegramId/toggle-proxy").handler(this::handleTelegramToggleProxy);
-        router.get("/telegram/:telegramId/ping").handler(this::handleTelegramPing);
-        router.get("/telegram/:telegramId/test-network").handler(this::handleTelegramTestNetwork);
+        // Test-only hermetic gateway (APP_ENV != prod only). Hard-off in prod: mount() adds NOTHING
+        // when disabled, so the injector surface is absent from a prod build.
+        telegram.files.http.HermeticGateway.mount(apiRouter, vertx);
 
-        router.get("/:telegramId/file/:uniqueId").handler(this::handleFilePreview);
-        router.post("/:telegramId/file/start-download").handler(this::handleFileStartDownload);
-        router.post("/:telegramId/file/cancel-download").handler(this::handleFileCancelDownload);
-        router.post("/:telegramId/file/toggle-pause-download").handler(this::handleFileTogglePauseDownload);
-        router.post("/:telegramId/file/remove").handler(this::handleFileRemove);
-        router.post("/:telegramId/file/update-auto-settings").handler(this::handleAutoSettingsUpdate);
-
-        router.get("/files/count").handler(this::handleFilesCount);
-        router.get("/files").handler(this::handleFiles);
-        router.post("/files/start-download-multiple").handler(this::handleFileStartDownloadMultiple);
-        router.post("/files/cancel-download-multiple").handler(this::handleFileCancelDownloadMultiple);
-        router.post("/files/toggle-pause-download-multiple").handler(this::handleFileTogglePauseDownloadMultiple);
-        router.post("/files/remove-multiple").handler(this::handleFileRemoveMultiple);
-        router.post("/files/update-tags").handler(this::handleFileTagsUpdateMultiple);
-        router.post("/file/:uniqueId/update-tags").handler(this::handleFileTagsUpdate);
+        router.route("/api/*").subRouter(apiRouter);
 
         router.route()
                 .failureHandler(ctx -> {
@@ -269,6 +259,95 @@ public class HttpVerticle extends AbstractVerticle {
                             .end(JsonObject.of("error", "Internal server error").encode());
                 });
         return router;
+    }
+
+    // ---- per-resource route groups (Phase-5 extraction) ---------------------------------------
+    // Each group mounts the SAME handlers onto whatever Router it is given, so calling it on the root
+    // router and again on the /api sub-router yields the deprecated alias AND its /api twin from one
+    // definition (structural alias parity).
+
+    /** Infra: root, version, health, metrics, websocket, settings, and the guarded TDLib passthrough. */
+    private void mountInfraRoutes(Router r) {
+        r.get("/").handler(ctx -> ctx.response().end("Hello World!"));
+        r.get("/version").handler(ctx -> ctx.json(new JsonObject().put("version", Start.VERSION)));
+        r.get("/health").handler(this::handleHealth);
+        r.get("/metrics").handler(this::handleMetrics);
+        r.route("/ws").handler(this::handleWebSocket);
+
+        r.get("/settings").handler(this::handleSettings);
+        r.post("/settings/create").handler(this::handleSettingsCreate);
+
+        r.get("/telegram/api/methods").handler(this::handleTelegramApiMethods);
+        r.get("/telegram/api/:method/parameters").handler(this::handleTelegramApiMethodParameters);
+        r.post("/telegram/api/:method").handler(this::handleTelegramApi);
+    }
+
+    /** Accounts: create/delete/list/change/proxy/ping/network. */
+    private void mountAccountRoutes(Router r) {
+        r.post("/telegram/create").handler(this::handleTelegramCreate);
+        r.post("/telegram/:telegramId/delete").handler(this::handleTelegramDelete);
+        r.get("/telegrams").handler(this::handleTelegrams);
+        r.post("/telegrams/change").handler(this::handleTelegramChange);
+        r.post("/telegram/:telegramId/toggle-proxy").handler(this::handleTelegramToggleProxy);
+        r.get("/telegram/:telegramId/ping").handler(this::handleTelegramPing);
+        r.get("/telegram/:telegramId/test-network").handler(this::handleTelegramTestNetwork);
+        r.get("/telegram/:telegramId/download-statistics").handler(this::handleTelegramDownloadStatistics);
+    }
+
+    /** Chats: chat list, chat files, counts, chat statistics. */
+    private void mountChatRoutes(Router r) {
+        r.get("/telegram/:telegramId/chats").handler(this::handleTelegramChats);
+        r.get("/telegram/:telegramId/chat/:chatId/files").handler(this::handleTelegramFiles);
+        r.get("/telegram/:telegramId/chat/:chatId/files/count").handler(this::handleTelegramFilesCount);
+        r.get("/telegram/:telegramId/chat/:chatId/statistics").handler(this::handleTelegramChatDownloadStatistics);
+    }
+
+    /** Files: preview, listing, counts, tags. */
+    private void mountFileRoutes(Router r) {
+        r.get("/:telegramId/file/:uniqueId").handler(this::handleFilePreview);
+        r.get("/files/count").handler(this::handleFilesCount);
+        r.get("/files").handler(this::handleFiles);
+        r.post("/files/update-tags").handler(this::handleFileTagsUpdateMultiple);
+        r.post("/file/:uniqueId/update-tags").handler(this::handleFileTagsUpdate);
+    }
+
+    /** Downloads: the legacy single + multiple download-control routes (deprecated aliases). */
+    private void mountDownloadRoutes(Router r) {
+        r.post("/:telegramId/file/start-download").handler(this::handleFileStartDownload);
+        r.post("/:telegramId/file/cancel-download").handler(this::handleFileCancelDownload);
+        r.post("/:telegramId/file/toggle-pause-download").handler(this::handleFileTogglePauseDownload);
+        r.post("/:telegramId/file/remove").handler(this::handleFileRemove);
+        r.post("/files/start-download-multiple").handler(this::handleFileStartDownloadMultiple);
+        r.post("/files/cancel-download-multiple").handler(this::handleFileCancelDownloadMultiple);
+        r.post("/files/toggle-pause-download-multiple").handler(this::handleFileTogglePauseDownloadMultiple);
+        r.post("/files/remove-multiple").handler(this::handleFileRemoveMultiple);
+    }
+
+    /** Automation: per-chat auto-download settings. */
+    private void mountAutomationRoutes(Router r) {
+        r.post("/:telegramId/file/update-auto-settings").handler(this::handleAutoSettingsUpdate);
+    }
+
+    private void handleHealth(RoutingContext ctx) {
+        telegram.files.http.HealthService.assess()
+                .onSuccess(h -> ctx.response()
+                        .setStatusCode(h.statusCode())
+                        .putHeader("Content-Type", "application/json")
+                        .end(h.body().encode()))
+                .onFailure(err -> ctx.response()
+                        .setStatusCode(503)
+                        .putHeader("Content-Type", "application/json")
+                        .end(new JsonObject().put("status", "DOWN")
+                                .put("error", err.getMessage()).encode()));
+    }
+
+    private void handleMetrics(RoutingContext ctx) {
+        telegram.files.http.MetricsService.render()
+                .onSuccess(text -> ctx.response()
+                        .putHeader("Content-Type", telegram.files.http.MetricsService.CONTENT_TYPE)
+                        .end(text))
+                .onFailure(err -> ctx.response().setStatusCode(500)
+                        .end("# metrics error: " + err.getMessage() + "\n"));
     }
 
     public Future<Void> initTelegramVerticles() {

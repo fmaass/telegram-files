@@ -139,6 +139,42 @@ public class TelegramVerticle extends AbstractVerticle {
         onFileUpdated(updateFile);
     }
 
+    /**
+     * Hermetic-gateway injection seam (Phase-5 E2E; APP_ENV != prod only, gated by
+     * {@link telegram.files.http.HermeticGateway#isEnabled()} at the call site). Marshals a FAKE
+     * {@code UpdateFile} onto THIS verticle's context and runs the REAL {@code onFileUpdated} — so the
+     * fake completion flows through the Phase-2 completion CAS and Phase-3 transfer publish exactly as
+     * a genuine TDLib callback would. This mutates NO frontend state directly; it drives the real
+     * pipeline. Public so the gateway (a different package) can reach it; behaviorally a no-op unless
+     * the gateway that calls it is enabled.
+     */
+    public void injectUpdateForGateway(TdApi.UpdateFile updateFile) {
+        io.vertx.core.Context ctx = context;
+        if (ctx == null) {
+            onFileUpdated(updateFile);
+        } else {
+            ctx.runOnContext(_ -> onFileUpdated(updateFile));
+        }
+    }
+
+    /**
+     * Hermetic-gateway bootstrap (Phase-5 E2E; enabled ONLY via
+     * {@link telegram.files.http.HermeticGateway#isEnabled()} at the call site — never in prod). Deploy
+     * this verticle with a FAKE {@link TelegramClient.Sender} instead of a real native TDLib client:
+     * {@code initializeForTest} binds the owning context + the fake sender so NO native Client is
+     * constructed (which would abort the JVM). The verticle is marked authorized with a synthetic
+     * {@link TelegramRecord} so it registers as a live account for the file-list enrichment and the
+     * download trigger — all backed by the fake sender, so it never touches the real Telegram network.
+     */
+    public void startHermetic(Promise<Void> startPromise, long telegramId, TelegramClient.Sender fakeSender) {
+        this.telegramRecord = new TelegramRecord(telegramId, "hermetic", this.rootPath, this.proxyName);
+        this.authorized = true;
+        this.client = new TelegramClient();
+        this.client.initializeForTest(context, fakeSender);
+        this.telegramChats = new TelegramChats(this.client);
+        startPromise.complete();
+    }
+
     /** Join every currently-outstanding worker/callback DB operation (used by the shutdown drain). */
     private Future<Void> drainOutstandingOperations() {
         draining = true;
@@ -445,7 +481,40 @@ public class TelegramVerticle extends AbstractVerticle {
                 });
     }
 
+    /**
+     * The outcome of a download trigger for THIS call — determined by the atomic-claim RESULT (not by
+     * re-reading the row afterward). A lost claim must NEVER be reported as a success/claim.
+     */
+    public enum ClaimOutcome {
+        /** THIS call won the idle->downloading atomic claim (rowCount==1) and started the download. */
+        CLAIMED,
+        /** THIS call lost the atomic claim (row was not idle for us / another worker won it). */
+        LOST,
+        /** The file was already active/terminal before any claim was attempted (a conflict). */
+        ALREADY_ACTIVE,
+        /** TDLib reported the file already fully downloaded; it was synced, not claimed. */
+        SYNCED
+    }
+
+    /** The trigger result: the current file_record plus THIS call's authoritative claim outcome. */
+    public record DownloadTrigger(FileRecord record, ClaimOutcome outcome) {
+        public boolean claimed() {
+            return outcome == ClaimOutcome.CLAIMED;
+        }
+    }
+
     public Future<FileRecord> startDownload(Long chatId, Long messageId, Integer fileId) {
+        // Preserve the legacy Future<FileRecord> contract for existing callers (AutoDownloadVerticle).
+        return startDownloadWithOutcome(chatId, messageId, fileId).map(DownloadTrigger::record);
+    }
+
+    /**
+     * Like {@link #startDownload} but returns THIS call's authoritative {@link ClaimOutcome} alongside
+     * the record, so the API layer can distinguish "I won the atomic claim" (CLAIMED) from "another
+     * worker won it" (LOST) WITHOUT re-reading the row state (which may belong to the other attempt).
+     * The state logic is unchanged — only the outcome is now surfaced.
+     */
+    public Future<DownloadTrigger> startDownloadWithOutcome(Long chatId, Long messageId, Integer fileId) {
         return Future.all(
                         client.execute(new TdApi.GetFile(fileId)),
                         fetchMessage(chatId, messageId),
@@ -468,14 +537,22 @@ public class TelegramVerticle extends AbstractVerticle {
                     if (file.local != null) {
                         if (file.local.isDownloadingCompleted) {
                             return syncFileDownloadStatus(file, message, messageThreadInfo)
-                                    .compose(_ -> DataVerticle.fileRepository.getByUniqueId(file.remote.uniqueId));
+                                    .compose(_ -> DataVerticle.fileRepository.getByUniqueId(file.remote.uniqueId))
+                                    .map(r -> new DownloadTrigger(r, ClaimOutcome.SYNCED));
                         }
                         if (file.local.isDownloadingActive) {
                             return Future.failedFuture("File is downloading");
                         }
 //                        return Future.failedFuture("Unknown file download status");
                     }
-                    if (dbFileRecord != null && !dbFileRecord.isDownloadStatus(FileRecord.DownloadStatus.idle)) {
+                    // Reject only the states that are NOT a legal download start: a live download or a
+                    // terminal/external-owned state. idle/paused/error ARE claimable start states
+                    // (canTransitionTo allows paused->downloading and error->downloading) and fall
+                    // through to the atomic-claim block below, which gates each on a single-winner CAS.
+                    if (dbFileRecord != null
+                        && !dbFileRecord.isDownloadStatus(FileRecord.DownloadStatus.idle)
+                        && !dbFileRecord.isDownloadStatus(FileRecord.DownloadStatus.paused)
+                        && !dbFileRecord.isDownloadStatus(FileRecord.DownloadStatus.error)) {
                         return Future.failedFuture("File is already downloading or completed");
                     }
 
@@ -506,31 +583,49 @@ public class TelegramVerticle extends AbstractVerticle {
                                     record.isDownloadStatus(FileRecord.DownloadStatus.completed) ||
                                     record.isDownloadStatus(FileRecord.DownloadStatus.processed) ||
                                     record.isDownloadStatus(FileRecord.DownloadStatus.imported)) {
-                                    return Future.succeededFuture(record);
-                                }
-                                
-                                // Atomic claim: flip idle->downloading AND mint the owning active
-                                // attempt in ONE transaction. If the row is not idle (lost the race to
-                                // another worker, or an external service changed it mid-flight), the
-                                // claim returns null and we must NOT proceed — only the winner downloads.
-                                Future<String> claimFuture;
-                                if (record.isDownloadStatus(FileRecord.DownloadStatus.idle)) {
-                                    claimFuture = DataVerticle.fileRepository.claimForDownload(
-                                            record.id(), record.uniqueId(), getRootId());
-                                } else {
-                                    // Already downloading (re-entry with a live attempt); no new claim.
-                                    claimFuture = Future.succeededFuture(null);
+                                    // The row is already active/terminal — NOT claimed by THIS call.
+                                    return Future.succeededFuture(new DownloadTrigger(record, ClaimOutcome.ALREADY_ACTIVE));
                                 }
 
-                                boolean wasIdle = record.isDownloadStatus(FileRecord.DownloadStatus.idle);
+                                // Atomic claim for EVERY claimable start state (idle OR a paused/error
+                                // re-download): ONE transaction CASes the exact current state ->
+                                // downloading AND mints the owning active attempt. Both-or-neither,
+                                // single-winner under concurrency (the one-active-attempt index rejects a
+                                // duplicate). If the row is not in THIS call's observed start state (lost
+                                // the race to another worker, or externally changed mid-flight), the claim
+                                // returns null and we must NOT proceed — only the CAS winner downloads.
+                                // The paused/error re-download therefore has exactly one winner too.
+                                FileRecord.DownloadStatus fromState;
+                                if (record.isDownloadStatus(FileRecord.DownloadStatus.idle)) {
+                                    fromState = FileRecord.DownloadStatus.idle;
+                                } else if (record.isDownloadStatus(FileRecord.DownloadStatus.paused)) {
+                                    fromState = FileRecord.DownloadStatus.paused;
+                                } else if (record.isDownloadStatus(FileRecord.DownloadStatus.error)) {
+                                    fromState = FileRecord.DownloadStatus.error;
+                                } else {
+                                    // Unknown/legacy status: not claimable via a defined transition.
+                                    return Future.succeededFuture(new DownloadTrigger(record, ClaimOutcome.ALREADY_ACTIVE));
+                                }
+
+                                // idle: never retire a lingering active attempt (it means a concurrent
+                                // claim is in flight -> this call must lose). paused/error re-download:
+                                // retire the row's own prior attempt so the fresh claim can mint one.
+                                boolean retireExistingActive = fromState != FileRecord.DownloadStatus.idle;
+                                Future<String> claimFuture = DataVerticle.fileRepository.claimForDownloadFrom(
+                                        record.id(), record.uniqueId(), getRootId(),
+                                        java.util.Set.of(fromState), retireExistingActive);
+
                                 return claimFuture.compose(attemptId -> {
-                                    if (wasIdle && attemptId == null) {
-                                        // Lost the claim race — someone else owns this download now.
-                                        log.debug("[%s] startDownload claim lost for uniqueId=%s (not idle)"
-                                                .formatted(getRootId(), record.uniqueId()));
-                                        return Future.succeededFuture(record);
+                                    if (attemptId == null) {
+                                        // Lost the atomic CAS — another worker won this (re-)download.
+                                        // THIS call did NOT win: report LOST, never a claim. The record
+                                        // may now read 'downloading' because the WINNER set it; we must
+                                        // NOT infer success from that state.
+                                        log.debug("[%s] startDownload claim lost for uniqueId=%s (from %s)"
+                                                .formatted(getRootId(), record.uniqueId(), fromState));
+                                        return Future.succeededFuture(new DownloadTrigger(record, ClaimOutcome.LOST));
                                     }
-                                    // Start the download
+                                    // Start the download — THIS call won the atomic claim (rowCount==1).
                                     return client.execute(new TdApi.AddFileToDownloads(fileId, chatId, messageId, 32))
                                             .onSuccess(ignore -> {
                                                 sendEvent(EventPayload.build(EventPayload.TYPE_FILE_STATUS, new JsonObject()
@@ -553,26 +648,21 @@ public class TelegramVerticle extends AbstractVerticle {
                                                 }
                                                 // Roll back the claim we own: CAS downloading->rollback via
                                                 // the owning attempt (retires it), tolerating an external
-                                                // reset. If we did not just claim (attemptId == null), only
-                                                // retire any active attempt as a safety net.
-                                                if (attemptId != null) {
-                                                    DataVerticle.fileRepository.transitionOwned(
-                                                            record.id(), record.uniqueId(), attemptId,
-                                                            FileRecord.DownloadStatus.downloading, rollbackStatus, null, null
-                                                    ).onFailure(rollbackErr ->
-                                                            log.error("[%s] Rollback failed for uniqueId=%s: %s"
-                                                                    .formatted(getRootId(), record.uniqueId(), rollbackErr.getMessage()))
-                                                    );
-                                                } else {
-                                                    // D8: surface the failure (was fire-and-forget). A dropped
-                                                    // safety-net retire leaves an orphaned active attempt that
-                                                    // blocks the next claim until reconciliation clears it.
-                                                    DataVerticle.fileRepository.retireActiveAttempts(record.uniqueId())
-                                                            .onFailure(retireErr -> log.error("[%s] Failed to retire active attempts for uniqueId=%s: %s"
-                                                                    .formatted(getRootId(), record.uniqueId(), retireErr.getMessage())));
-                                                }
+                                                // reset. attemptId is always non-null here (we only reach
+                                                // AddFileToDownloads after winning the atomic CAS).
+                                                DataVerticle.fileRepository.transitionOwned(
+                                                        record.id(), record.uniqueId(), attemptId,
+                                                        FileRecord.DownloadStatus.downloading, rollbackStatus, null, null
+                                                ).onFailure(rollbackErr ->
+                                                        log.error("[%s] Rollback failed for uniqueId=%s: %s"
+                                                                .formatted(getRootId(), record.uniqueId(), rollbackErr.getMessage()))
+                                                );
                                             })
-                                            .map(ignore -> record);
+                                            // Reaching AddFileToDownloads means THIS call won the atomic
+                                            // claim (rowCount==1, attemptId minted) for its start state
+                                            // (idle OR a paused/error re-download) — THIS call caused the
+                                            // download to start: CLAIMED. A concurrent loser got LOST above.
+                                            .map(ignore -> new DownloadTrigger(record, ClaimOutcome.CLAIMED));
                                 });
                             });
                 });
@@ -698,6 +788,77 @@ public class TelegramVerticle extends AbstractVerticle {
                         .put("removed", true)
                 )))
                 .mapEmpty();
+    }
+
+    /**
+     * Resolve the CURRENT (volatile) TDLib fileId for a message from its STABLE identity
+     * (chatId + messageId). TDLib's fileId changes across sessions/restarts, so a trigger keyed on a
+     * remembered fileId can address the wrong (or a gone) file — this resolves the live one exactly as
+     * {@link AutoDownloadVerticle} does before starting a download. Fails 404 if the message is gone or
+     * carries no downloadable file.
+     */
+    public Future<Integer> resolveCurrentFileId(long chatId, long messageId) {
+        return fetchMessage(chatId, messageId)
+                .compose(message -> {
+                    Optional<TdApiHelp.FileHandler<?>> handlerOpt = TdApiHelp.getFileHandler(message);
+                    if (handlerOpt.isEmpty() || handlerOpt.get().getFileId() == null) {
+                        return Future.failedFuture(telegram.files.http.ApiException.notFound(
+                                "Message %d in chat %d has no downloadable file".formatted(messageId, chatId)));
+                    }
+                    return Future.succeededFuture(handlerOpt.get().getFileId());
+                });
+    }
+
+    /**
+     * Trigger a download from STABLE identity (chat + message), resolving the volatile fileId at
+     * trigger time and delegating to the Phase-2 {@link #startDownload} atomic-claim workflow. Never
+     * queues — it claims immediately (or reports the real state / a lost-claim race). When
+     * {@code knownFileId} is supplied it is used only as a hint; the resolved live id always wins.
+     */
+    public Future<DownloadTrigger> triggerDownload(long chatId, long messageId, Integer knownFileId) {
+        return resolveCurrentFileId(chatId, messageId)
+                .compose(fileId -> startDownloadWithOutcome(chatId, messageId, fileId));
+    }
+
+    /**
+     * API-boundary transition guard (Phase-5 second layer over the Phase-2 CAS): load the file by
+     * {@code uniqueId}, verify {@code current.canTransitionTo(target)}, and — for destructive ops —
+     * refuse a {@code processed}/{@code imported} (externally-owned) file. On a legal request it runs
+     * {@code action}; on an illegal one it fails with a 409 {@link telegram.files.http.ApiException}
+     * carrying the real current state (never a false success). 404 if the row is absent.
+     *
+     * @param target      the download_status the op transitions the file toward (for the legality check)
+     * @param destructive whether the op destroys externally-owned state (cancel/remove/delete)
+     */
+    public <T> Future<T> guardedFileOp(String uniqueId,
+                                       FileRecord.DownloadStatus target,
+                                       boolean destructive,
+                                       java.util.function.Function<FileRecord, Future<T>> action) {
+        return DataVerticle.fileRepository.getByUniqueId(uniqueId)
+                .compose(record -> {
+                    if (record == null) {
+                        return Future.failedFuture(telegram.files.http.ApiException.notFound(
+                                "File not found: " + uniqueId));
+                    }
+                    FileRecord.DownloadStatus current;
+                    try {
+                        current = FileRecord.DownloadStatus.valueOf(record.downloadStatus());
+                    } catch (IllegalArgumentException | NullPointerException e) {
+                        return Future.failedFuture(telegram.files.http.ApiException.conflict(
+                                "File %s has an unknown download status '%s'".formatted(uniqueId, record.downloadStatus())));
+                    }
+                    if (destructive && (current == FileRecord.DownloadStatus.processed
+                                        || current == FileRecord.DownloadStatus.imported)) {
+                        return Future.failedFuture(telegram.files.http.ApiException.conflict(
+                                "File %s is %s and owned by external services; it cannot be destroyed via the API"
+                                        .formatted(uniqueId, current)));
+                    }
+                    if (target != null && !current.canTransitionTo(target)) {
+                        return Future.failedFuture(telegram.files.http.ApiException.conflict(
+                                "Illegal transition %s -> %s for file %s".formatted(current, target, uniqueId)));
+                    }
+                    return action.apply(record);
+                });
     }
 
     public Future<Void> updateAutoSettings(Long chatId, JsonObject params) {

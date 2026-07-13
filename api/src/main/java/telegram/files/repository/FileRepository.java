@@ -63,6 +63,30 @@ public interface FileRepository {
     Future<String> claimForDownload(int fileId, String uniqueId, String leaseOwner);
 
     /**
+     * Generalized atomic claim from ANY of {@code legalFromStates}: within ONE transaction, exact-state
+     * CAS {@code download_status IN (legalFromStates) -> downloading} AND INSERT the owning active
+     * attempt. Both-or-neither, single-winner under concurrency (the one-active-attempt partial unique
+     * index rejects a duplicate). This is the SAME primitive {@link #claimForDownload} uses (which is
+     * exactly {@code claimForDownloadFrom(..., {idle})}); it additionally supports the {@code paused}/
+     * {@code error} re-download transitions ({@code canTransitionTo} allows {@code paused->downloading}
+     * and {@code error->downloading}) so a concurrent re-download also has exactly one winner.
+     *
+     * @param legalFromStates the permitted current states (each must legally transition to downloading).
+     * @param retireExistingActive when true, any pre-existing {@code active} attempt for this
+     *        {@code unique_id} is retired WITHIN the same transaction BEFORE the new attempt is minted.
+     *        This is required for a {@code paused}/{@code error} RE-download, whose row still carries the
+     *        prior attempt (the un-owned status chokepoint does not retire it) — retiring it lets the
+     *        winner mint a fresh attempt. It MUST be false for the {@code idle} claim, where a lingering
+     *        active attempt legitimately means a concurrent claim is already in flight and THIS call must
+     *        LOSE (preserving the idle single-winner invariant). The {@code file_record} CAS remains the
+     *        single-winner gate either way.
+     * @return the minted {@code attempt_id} iff THIS call won the CAS, else {@code null}.
+     */
+    Future<String> claimForDownloadFrom(int fileId, String uniqueId, String leaseOwner,
+                                        java.util.Set<FileRecord.DownloadStatus> legalFromStates,
+                                        boolean retireExistingActive);
+
+    /**
      * Owned progress transition performed by the worker that holds {@code attemptId}. Exact-state
      * CAS: {@code WHERE unique_id=? AND download_status=<exactObservedPrior> AND EXISTS(active attempt
      * with attempt_id=?)}. A stale writer (wrong prior state) or a superseded attempt yields

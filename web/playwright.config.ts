@@ -13,6 +13,9 @@ const BASE_URL = `http://127.0.0.1:${PORT}`;
 
 export default defineConfig({
   testDir: "./e2e",
+  // The download e2e needs the real backend + hermetic gateway; it runs under
+  // playwright.download.config.ts, not this static-only smoke harness.
+  testIgnore: ["**/download.spec.ts"],
   fullyParallel: true,
   forbidOnly: !!process.env.CI,
   retries: process.env.CI ? 1 : 0,
