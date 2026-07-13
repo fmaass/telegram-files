@@ -147,8 +147,27 @@ public class TelegramVerticle extends AbstractVerticle {
      * a genuine TDLib callback would. This mutates NO frontend state directly; it drives the real
      * pipeline. Public so the gateway (a different package) can reach it; behaviorally a no-op unless
      * the gateway that calls it is enabled.
+     * <p>
+     * <b>Defense-in-depth prod safety.</b> This method REFUSES under {@code APP_ENV=prod} even if the
+     * HTTP gate is somehow bypassed — the injector must never mutate the real pipeline in production.
+     * The check lives on the mutation entrypoint itself, not only on the (already-gated) HTTP call site.
      */
     public void injectUpdateForGateway(TdApi.UpdateFile updateFile) {
+        injectUpdateForGateway(updateFile, Config.isProd());
+    }
+
+    /**
+     * Package-visible overload carrying the prod flag so the prod-refusal guard can be unit-tested
+     * WITHOUT mutating the static-final {@code Config.APP_ENV}. When {@code isProd} is true it refuses
+     * (throws) and never touches the pipeline; otherwise it marshals the update onto this verticle's
+     * context and runs the REAL {@code onFileUpdated}.
+     */
+    void injectUpdateForGateway(TdApi.UpdateFile updateFile, boolean isProd) {
+        if (isProd) {
+            log.error("[%s] REFUSED gateway update injection under APP_ENV=prod — this must never happen"
+                    .formatted(getRootId()));
+            throw new IllegalStateException("hermetic gateway injection is forbidden under APP_ENV=prod");
+        }
         io.vertx.core.Context ctx = context;
         if (ctx == null) {
             onFileUpdated(updateFile);

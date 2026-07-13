@@ -1,4 +1,15 @@
 import { test, expect } from "@playwright/test";
+import { startHermeticBackend } from "./hermetic-backend.mjs";
+
+// Boot an ISOLATED hermetic backend (own fresh SQLite DB) for THIS spec, so its transfer/timer writes
+// never contend with another spec's writes on a shared DB (SQLITE_BUSY_SNAPSHOT flake).
+let backend: { stop: () => Promise<void> };
+test.beforeAll(async () => {
+  backend = await startHermeticBackend();
+});
+test.afterAll(async () => {
+  await backend?.stop();
+});
 
 /**
  * Phase-5 DOWNLOAD e2e against the REAL Java backend + the hermetic gateway.
@@ -8,8 +19,10 @@ import { test, expect } from "@playwright/test";
  * page's own fetch (same code path as web/src/lib/api.ts `request()`) calls the REAL
  * `POST /api/downloads` trigger, and the download's progression flows through the REAL Phase-2 claim,
  * the Phase-2 completion CAS, and the Phase-3 durable transfer in the backend — NOT a frontend-only
- * mutation. The test asserts the transfer actually ran (transfer_status=completed + local_path in the
- * destination), not merely download_status=completed.
+ * mutation. This asserts the FULL deterministic end-to-end: the trigger CLAIMS (202/CLAIMED), the row
+ * appears downloading, and after a hermetic completion (which the gateway confirms durably applied) the
+ * row reaches download_status=completed AND transfer_status=completed with local_path moved into the
+ * transfer DESTINATION — the real Phase-3 durable transfer ran, not merely a status flip.
  */
 
 const CHAT_ID = 100;
@@ -60,7 +73,9 @@ test("real POST /api/downloads triggers, claims, completes, and the Phase-3 tran
   await expect(page).toHaveTitle(/Telegram Files/i);
 
   // 1) Register a hermetic account (fake sender, no native TDLib) + a transfer automation so Phase-3
-  //    picks up the completed download and runs the durable transfer.
+  //    picks up the completed download and runs the durable transfer. The gateway's automation seed does
+  //    NOT return 200 until the automation is EFFECTIVE in the TransferVerticle's live snapshot, so the
+  //    later completion event deterministically finds the automation.
   const account = await apiFetch(page, "/api/test/gateway/account", {
     method: "POST",
     body: JSON.stringify({ telegramId: 1 }),
@@ -85,7 +100,7 @@ test("real POST /api/downloads triggers, claims, completes, and the Phase-3 tran
   expect(triggered.outcome).toBe("CLAIMED");
   const uniqueId = triggered.uniqueId;
 
-  // 3) Assert the download APPEARS as downloading in the resource listing.
+  // 3) Assert the download APPEARS as downloading in the resource listing (the Phase-2 claim landed).
   await expect
     .poll(async () => (await findFile(page, "downloading", uniqueId))?.downloadStatus, {
       timeout: 10_000,
@@ -93,7 +108,7 @@ test("real POST /api/downloads triggers, claims, completes, and the Phase-3 tran
     .toBe("downloading");
 
   // 4) Inject a hermetic DOWNLOAD-COMPLETE through the REAL Phase-2/3 pipeline (writes a real artifact
-  //    the transfer will move).
+  //    the transfer will move). The gateway confirms the completion durably applied before returning 200.
   const complete = await apiFetch(page, "/api/test/gateway/complete", {
     method: "POST",
     body: JSON.stringify({ uniqueId }),

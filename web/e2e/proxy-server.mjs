@@ -5,6 +5,7 @@
 // run against the REAL backend from a single origin — the frontend fetches relative /api/... which
 // this server forwards to the backend, so the browser sees one host with no CORS.
 import { createServer, request as httpRequest } from "node:http";
+import { connect as netConnect } from "node:net";
 import { readFile, stat } from "node:fs/promises";
 import { extname, join, normalize } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -27,15 +28,32 @@ const MIME = {
   ".woff2": "font/woff2",
 };
 
+async function fileExists(p) {
+  try {
+    const s = await stat(p);
+    return s.isFile();
+  } catch {
+    return false;
+  }
+}
+
 async function resolveFile(urlPath) {
   const clean = decodeURIComponent(urlPath.split("?")[0]);
   const rel = normalize(clean).replace(/^(\.\.[/\\])+/, "");
-  let candidate = join(root, rel);
+  const candidate = join(root, rel);
+  if (await fileExists(candidate)) return candidate;
+  // Next.js static export writes a route like `/files` as a SIBLING `files.html` file — even when a
+  // `files/` directory also exists (for the route's data chunks). Prefer the `.html` sibling over the
+  // directory's non-existent index.html so nested routes (`/files`, `/accounts`) resolve, not just `/`.
+  if (!extname(candidate)) {
+    const asHtml = `${candidate}.html`;
+    if (await fileExists(asHtml)) return asHtml;
+  }
   try {
     const s = await stat(candidate);
-    if (s.isDirectory()) candidate = join(candidate, "index.html");
+    if (s.isDirectory()) return join(candidate, "index.html");
   } catch {
-    if (!extname(candidate)) candidate = `${candidate}.html`;
+    if (!extname(candidate)) return `${candidate}.html`;
   }
   return candidate;
 }
@@ -81,6 +99,33 @@ const server = createServer(async (req, res) => {
     res.writeHead(404, { "Content-Type": "text/plain" });
     res.end("Not found");
   }
+});
+
+// WebSocket upgrade proxy: the frontend opens a same-origin ws://<this-host>/ws, which the browser
+// upgrades via this server. Forward the raw upgrade handshake + the byte stream to the backend /ws so
+// the REAL Vert.x websocket (session cookie carried in the upgrade headers) fans out to this socket.
+// Without this, /ws would 404 here and the SPA's websocket never reaches the backend.
+server.on("upgrade", (req, clientSocket, head) => {
+  const upstream = netConnect(backendPort, backendHost, () => {
+    // Re-serialize the upgrade request line + headers to the backend, stripping cross-origin markers so
+    // the backend's dev CORS/allowlist does not reject the forwarded handshake (mirrors proxyToBackend).
+    const headers = { ...req.headers, host: `${backendHost}:${backendPort}` };
+    delete headers.origin;
+    delete headers.referer;
+    let raw = `${req.method} ${req.url} HTTP/1.1\r\n`;
+    for (const [k, v] of Object.entries(headers)) {
+      const vals = Array.isArray(v) ? v : [v];
+      for (const one of vals) raw += `${k}: ${one}\r\n`;
+    }
+    raw += "\r\n";
+    upstream.write(raw);
+    if (head && head.length) upstream.write(head);
+    upstream.pipe(clientSocket);
+    clientSocket.pipe(upstream);
+  });
+  const cleanup = () => { try { upstream.destroy(); } catch { /* ignore */ } try { clientSocket.destroy(); } catch { /* ignore */ } };
+  upstream.on("error", cleanup);
+  clientSocket.on("error", cleanup);
 });
 
 server.listen(port, () => {

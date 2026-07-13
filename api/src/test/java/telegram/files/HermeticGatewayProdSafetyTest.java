@@ -3,11 +3,13 @@ package telegram.files;
 import io.vertx.core.Vertx;
 import io.vertx.ext.web.Router;
 import io.vertx.ext.web.Route;
+import org.drinkless.tdlib.TdApi;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import telegram.files.repository.TelegramRecord;
 import telegram.files.http.HermeticGateway;
 
 import java.util.List;
@@ -53,6 +55,38 @@ class HermeticGatewayProdSafetyTest {
         Assertions.assertTrue(HermeticGateway.enabledFor(false, "1"),
                 "non-prod WITH the flag enables the gateway");
         Assertions.assertTrue(HermeticGateway.enabledFor(false, "true"));
+    }
+
+    @Test
+    @DisplayName("injectUpdateForGateway REFUSES under prod (defense-in-depth on the mutation entrypoint)")
+    void injectRefusesUnderProd() {
+        // Construct a verticle WITHOUT a native TDLib client (the TelegramRecord ctor only sets fields).
+        TelegramVerticle tv = new TelegramVerticle(
+                new TelegramRecord(1L, "test", Config.TELEGRAM_ROOT + "/prod-safety", null));
+        TdApi.UpdateFile update = new TdApi.UpdateFile();
+        update.file = new TdApi.File();
+
+        // The prod-flagged overload must REFUSE and never reach the pipeline. Proven directly so the
+        // static-final Config.APP_ENV need not be mutated.
+        Assertions.assertThrows(IllegalStateException.class,
+                () -> tv.injectUpdateForGateway(update, true),
+                "injectUpdateForGateway must throw under APP_ENV=prod — the injector must never mutate the "
+                        + "real pipeline in production, even if the HTTP gate is bypassed");
+    }
+
+    @Test
+    @DisplayName("injectUpdateForGateway does NOT refuse under non-prod (the guard is prod-only)")
+    void injectAllowedUnderNonProd() {
+        // A non-prod injection must not throw on the prod guard. With a null context it runs
+        // onFileUpdated inline; the update carries a null file so onFileUpdated is a no-op — the point is
+        // that the PROD GUARD does not fire (no IllegalStateException).
+        TelegramVerticle tv = new TelegramVerticle(
+                new TelegramRecord(1L, "test", Config.TELEGRAM_ROOT + "/non-prod-safety", null));
+        TdApi.UpdateFile update = new TdApi.UpdateFile();
+        update.file = null; // onFileUpdated null-guards file -> no-op
+
+        Assertions.assertDoesNotThrow(() -> tv.injectUpdateForGateway(update, false),
+                "the prod guard must not fire under non-prod");
     }
 
     @Test

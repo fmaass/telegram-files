@@ -22,3 +22,4 @@ docker-compose-*.yml
 .DS_Store
 docs/session-reviews/
 docs/plans/
+__pycache__/
