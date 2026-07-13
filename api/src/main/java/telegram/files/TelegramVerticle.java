@@ -41,38 +41,113 @@ public class TelegramVerticle extends AbstractVerticle {
 
     private static final Log log = LogFactory.get();
 
-    public TelegramClient client;
+    // volatile: created on this verticle's context but read from other verticles/contexts
+    // (HttpVerticle/AutoDownload/Preload/HistoryDiscovery call client.execute). Safe publication.
+    public volatile TelegramClient client;
 
     private TelegramChats telegramChats;
 
-    public boolean authorized = false;
+    // volatile cross-context fields (D4 safe publication): written on THIS verticle's context
+    // (TDLib ingress is marshaled here) but read from Http/AutoDownload/Preload/AutomationsHolder.
+    public volatile boolean authorized = false;
 
-    public TdApi.AuthorizationState lastAuthorizationState;
+    public volatile TdApi.AuthorizationState lastAuthorizationState;
 
     public String rootPath;
 
-    private String proxyName;
+    private volatile String proxyName;
 
     private String rootId;
 
     private boolean needDelete = false;
 
-    public TelegramRecord telegramRecord;
+    public volatile TelegramRecord telegramRecord;
 
-    private AvgSpeed avgSpeed = new AvgSpeed();
+    private volatile AvgSpeed avgSpeed = new AvgSpeed();
 
     private long avgSpeedPersistenceTimerId;
 
     private long downloadStatusReconciliationTimerId;
 
-    public TdApi.ConnectionState lastConnectionState;
+    public volatile TdApi.ConnectionState lastConnectionState;
 
-    private long lastFileEventTime;
+    private volatile long lastFileEventTime;
 
-    private long lastFileDownloadEventTime;
+    private volatile long lastFileDownloadEventTime;
+
+    // In-flight guards (D7): a slow reconciliation pass must not overlap the next timer tick.
+    private volatile boolean reconciliationInFlight = false;
+
+    // Outstanding worker/callback DB operations spawned off the request path (the off-loop
+    // syncCompletedFilesStatus sweep and the reconciliation pass). shutdown/close() AWAITS these
+    // before the pool closes, so no callback/worker/reconciliation DB write can execute against a
+    // closed pool. A ConcurrentHashMap-backed set: registration happens on the verticle context
+    // (single-threaded) but completion handlers that self-deregister may run on other contexts.
+    private final Set<Future<?>> outstandingOperations = java.util.concurrent.ConcurrentHashMap.newKeySet();
+
+    // Set once close()/stop() begins draining, so no NEW operation is registered after the drain
+    // snapshot — a late registrant would otherwise race past the join and hit a closed pool.
+    private volatile boolean draining = false;
 
     public TelegramVerticle(String rootPath) {
         this.rootPath = rootPath;
+    }
+
+    /**
+     * Register an in-flight worker/callback DB operation so {@link #close} awaits it before the pool
+     * closes. Self-deregisters on completion. If a drain has already begun the operation is NOT
+     * tracked (the caller must not have started new pool work after shutdown) — it is returned as-is;
+     * callers gate their own work on {@code draining} first.
+     */
+    private <T> Future<T> trackOperation(Future<T> operation) {
+        if (draining) {
+            return operation;
+        }
+        outstandingOperations.add(operation);
+        operation.onComplete(_ -> outstandingOperations.remove(operation));
+        return operation;
+    }
+
+    // Package-private test seams for the shutdown-drain invariant (no live TDLib client required).
+    <T> Future<T> trackOperationForTest(Future<T> operation) {
+        return trackOperation(operation);
+    }
+
+    Future<Void> drainOutstandingOperationsForTest() {
+        return drainOutstandingOperations();
+    }
+
+    boolean isDrainingForTest() {
+        return draining;
+    }
+
+    int outstandingOperationCountForTest() {
+        return outstandingOperations.size();
+    }
+
+    // Test-only override of the file-update DB write (persistFileUpdate) so the onFileUpdated
+    // track+gate wrapper can be exercised with a controllable-latency write and no real DB/native
+    // client. When set, onFileUpdated uses this instead of the real getByUniqueId+write chain.
+    private java.util.function.Supplier<Future<Void>> fileUpdatePersistOverrideForTest;
+
+    void setFileUpdatePersistOverrideForTest(java.util.function.Supplier<Future<Void>> override) {
+        this.fileUpdatePersistOverrideForTest = override;
+    }
+
+    // Package-private seam: drive the REAL onFileUpdated gate+track path with a given update.
+    void handleFileUpdateForTest(TdApi.UpdateFile updateFile) {
+        onFileUpdated(updateFile);
+    }
+
+    /** Join every currently-outstanding worker/callback DB operation (used by the shutdown drain). */
+    private Future<Void> drainOutstandingOperations() {
+        draining = true;
+        List<Future<?>> snapshot = new java.util.ArrayList<>(outstandingOperations);
+        if (snapshot.isEmpty()) {
+            return Future.succeededFuture();
+        }
+        log.info("[%s] Draining %d outstanding DB operation(s) before pool close".formatted(getRootId(), snapshot.size()));
+        return Future.join(snapshot).mapEmpty();
     }
 
     public TelegramVerticle(TelegramRecord telegramRecord) {
@@ -108,7 +183,9 @@ public class TelegramVerticle extends AbstractVerticle {
         telegramUpdateHandler.setOnMessageReceived(this::onMessageReceived);
         telegramUpdateHandler.setOnConnectionStateUpdated(this::onConnectionStateUpdated);
 
-        client.initialize(telegramUpdateHandler, this::handleException, this::handleException);
+        // Bind the client to THIS verticle's context so ALL TDLib ingress (update callbacks AND
+        // per-request result callbacks) is marshaled onto the verticle's own thread (D4/D5 root fix).
+        client.initialize(telegramUpdateHandler, this::handleException, this::handleException, context);
         Future.all(initEventConsumer(), initAvgSpeed())
                 .compose(_ -> this.enableProxy(this.proxyName))
                 .compose(_ -> this.initDownloadStatusReconciliation())
@@ -123,16 +200,32 @@ public class TelegramVerticle extends AbstractVerticle {
     }
 
     public Future<Void> close(boolean needDelete) {
+        // Stop new passes first so nothing new is registered while we drain.
         if (downloadStatusReconciliationTimerId != 0) {
             vertx.cancelTimer(downloadStatusReconciliationTimerId);
             downloadStatusReconciliationTimerId = 0;
         }
-        return client.execute(new TdApi.Close())
+        if (avgSpeedPersistenceTimerId != 0) {
+            vertx.cancelTimer(avgSpeedPersistenceTimerId);
+            avgSpeedPersistenceTimerId = 0;
+        }
+        // Await every in-flight worker/callback DB operation (the off-loop syncCompletedFilesStatus
+        // sweep and the reconciliation pass, each of which issues DB writes) BEFORE closing the pool.
+        // These operations are internally bounded by their 15s per-call TDLib timeouts, so the drain
+        // cannot hang indefinitely. This guarantees no callback/worker/reconciliation DB write runs
+        // against a closed pool after Start.close().
+        return drainOutstandingOperations()
+                // D5: bound the Close with a timeout so shutdown cannot hang forever waiting on TDLib.
+                .compose(_ -> client.execute(new TdApi.Close(), 10_000, vertx))
                 .onSuccess(_ -> {
                     log.info("[%s] Telegram account closed".formatted(this.getRootId()));
                     this.needDelete = needDelete;
                 })
                 .onFailure(e -> log.error("[%s] Failed to close telegram account: %s".formatted(this.getRootId(), e.getMessage())))
+                // Reject every still-outstanding request promise (cancellation on close) regardless of
+                // the Close outcome — after the client closes no per-request callback will fire again.
+                .onComplete(_ -> client.rejectAllOutstanding(
+                        new IllegalStateException("[%s] TDLib client closed".formatted(this.getRootId()))))
                 .mapEmpty();
     }
 
@@ -471,7 +564,12 @@ public class TelegramVerticle extends AbstractVerticle {
                                                                     .formatted(getRootId(), record.uniqueId(), rollbackErr.getMessage()))
                                                     );
                                                 } else {
-                                                    DataVerticle.fileRepository.retireActiveAttempts(record.uniqueId());
+                                                    // D8: surface the failure (was fire-and-forget). A dropped
+                                                    // safety-net retire leaves an orphaned active attempt that
+                                                    // blocks the next claim until reconciliation clears it.
+                                                    DataVerticle.fileRepository.retireActiveAttempts(record.uniqueId())
+                                                            .onFailure(retireErr -> log.error("[%s] Failed to retire active attempts for uniqueId=%s: %s"
+                                                                    .formatted(getRootId(), record.uniqueId(), retireErr.getMessage())));
                                                 }
                                             })
                                             .map(ignore -> record);
@@ -777,9 +875,19 @@ public class TelegramVerticle extends AbstractVerticle {
                 promise.fail("Unsupported method: " + method);
                 return;
             }
+            io.vertx.core.Context ctx = context;
             client.getNativeClient().send(func, object -> {
-                log.debug("[{}] Execute: [{}] Receive result: {}", getRootId(), code, object);
-                handleDefaultResult(object, code);
+                // Marshal the raw TDLib result callback onto the verticle's context so the handler
+                // runs on the verticle's own thread, not TDLib's native receive thread (D4).
+                Runnable handle = () -> {
+                    log.debug("[{}] Execute: [{}] Receive result: {}", getRootId(), code, object);
+                    handleDefaultResult(object, code);
+                };
+                if (ctx == null) {
+                    handle.run();
+                } else {
+                    ctx.runOnContext(_ -> handle.run());
+                }
             });
             promise.complete(code);
         });
@@ -896,10 +1004,14 @@ public class TelegramVerticle extends AbstractVerticle {
         }
         JsonObject data = JsonObject.mapFrom(speedStats);
         data.remove("interval");
+        // D8: surface the write failure (was fire-and-forget). A dropped speed-statistic insert
+        // silently loses a data point from the speed history charts.
         DataVerticle.statisticRepository.create(new StatisticRecord(Convert.toStr(telegramRecord.id()),
                 StatisticRecord.Type.speed,
                 System.currentTimeMillis(),
-                data.encode()));
+                data.encode()))
+                .onFailure(err -> log.error("[%s] Failed to persist speed statistic: %s"
+                        .formatted(getRootId(), err.getMessage())));
 
         // Avoid speed not being updated for a long time
         avgSpeed.update(0, System.currentTimeMillis());
@@ -943,98 +1055,141 @@ public class TelegramVerticle extends AbstractVerticle {
     }
 
     private void reconcileDownloadStatuses() {
-        if (!authorized || telegramRecord == null) {
+        if (!authorized || telegramRecord == null || draining) {
             return;
         }
+
+        // D7 in-flight guard: a reconciliation pass that outruns the 30s timer must not start a
+        // second concurrent pass (overlapping GetFile fan-outs and duplicate zombie writes). Skip
+        // this tick if the previous pass is still running; the flag clears when the sweep completes.
+        if (reconciliationInFlight) {
+            log.trace("[%s] Reconciliation still in flight, skipping this pass".formatted(getRootId()));
+            return;
+        }
+        reconciliationInFlight = true;
 
         log.trace("[%s] Starting download status reconciliation".formatted(getRootId()));
 
         // Retire orphaned active attempts: a row an external service reset downloading->idle (or that
         // reached a terminal state without the owning worker retiring its attempt) still carries an
         // 'active' attempt, which would block a fresh claim under the one-active-attempt constraint.
-        DataVerticle.fileRepository.retireOrphanedAttempts()
-                .onSuccess(retired -> {
-                    if (retired > 0) {
-                        log.debug("[%s] Reconciliation retired %d orphaned download attempt(s)".formatted(getRootId(), retired));
-                    }
-                })
-                .onFailure(err -> log.warn("[%s] Failed to retire orphaned attempts: %s".formatted(getRootId(), err.getMessage())));
+        // GLOBALLY single-flight (D7): retireOrphanedAttempts is process-wide, so multiple telegram
+        // verticles ticking at once must not all run it concurrently.
+        Future<Integer> orphanFuture = retireOrphanedAttemptsSingleFlight();
 
-        DataVerticle.fileRepository.getByDownloadStatus(telegramRecord.id(), FileRecord.DownloadStatus.downloading)
-                .onSuccess(fileRecords -> {
+        Future<Void> sweepFuture = DataVerticle.fileRepository.getByDownloadStatus(telegramRecord.id(), FileRecord.DownloadStatus.downloading)
+                .compose(fileRecords -> {
                     if (fileRecords == null || fileRecords.isEmpty()) {
-                        return;
+                        return Future.<Void>succeededFuture();
                     }
 
                     log.debug("[%s] Reconciling %d files with 'downloading' status".formatted(getRootId(), fileRecords.size()));
                     int[] reconciledCount = {0};
 
-                    fileRecords.forEach(fileRecord -> {
-                        client.execute(new TdApi.GetFile(fileRecord.id()))
-                                .onSuccess(file -> {
-                                    if (file.local != null && file.local.isDownloadingCompleted) {
-                                        log.info("[%s] Reconciliation: File completed but not updated in DB: %s".formatted(getRootId(), file.remote.uniqueId));
-                                        reconciledCount[0]++;
+                    List<Future<?>> perFileFutures = new java.util.ArrayList<>();
+                    fileRecords.forEach(fileRecord ->
+                            // Each per-file future COMPOSES its DB write, so it completes only AFTER the
+                            // write finishes — the pass (and the in-flight guard, and the shutdown drain
+                            // that tracks this whole pass) therefore reflects real DB-write completion,
+                            // not just the GetFile response. D5: bound each GetFile so a hung TDLib call
+                            // cannot pin the pass open forever.
+                            perFileFutures.add(reconcileOneDownloadingFile(fileRecord, reconciledCount)));
 
-                                        DataVerticle.fileRepository.updateDownloadStatus(
-                                                file.id,
-                                                file.remote.uniqueId,
-                                                file.local.path,
-                                                FileRecord.DownloadStatus.completed,
-                                                System.currentTimeMillis()
-                                        ).onSuccess(result -> {
-                                            sendFileStatusHttpEvent(file, result);
-                                            log.debug("[%s] Reconciliation fixed file status: %s".formatted(getRootId(), file.remote.uniqueId));
-                                        });
-                                    } else if (file.local == null
-                                            || (!file.local.isDownloadingActive && !file.local.isDownloadingCompleted)) {
-                                        // Zombie: DB says 'downloading' but TDLib says not active and not completed.
-                                        // If queued > 2 min ago, mark as error to break retry cycles; otherwise reset to idle for one retry.
-                                        boolean staleZombie = fileRecord.queuedAt() != null
-                                                && (System.currentTimeMillis() - fileRecord.queuedAt()) > 120_000;
-                                        FileRecord.DownloadStatus targetStatus = staleZombie
-                                                ? FileRecord.DownloadStatus.error
-                                                : FileRecord.DownloadStatus.idle;
-                                        log.info("[%s] Reconciliation: Zombie download detected (%s), setting to %s: %s (dbId=%d)"
-                                                .formatted(getRootId(), staleZombie ? "stale" : "fresh", targetStatus, fileRecord.uniqueId(), fileRecord.id()));
-                                        reconciledCount[0]++;
+                    // Join the per-file chains so the pass stays open until every GetFile AND its write
+                    // has resolved. Individual failures are already handled per-file; use join() so one
+                    // failure does not short-circuit the rest.
+                    return Future.join(perFileFutures)
+                            .onComplete(_ -> {
+                                if (reconciledCount[0] > 0) {
+                                    log.info("[%s] Reconciliation completed: fixed %d stuck downloads".formatted(getRootId(), reconciledCount[0]));
+                                }
+                            })
+                            .mapEmpty();
+                })
+                .mapEmpty();
+        sweepFuture.onFailure(e -> log.error("[%s] Failed to get downloading files for reconciliation: %s".formatted(getRootId(), e.getMessage())));
 
-                                        // D8: surface the write failure (do not fire-and-forget). A zombie
-                                        // reconciliation write that silently fails leaves the row stuck
-                                        // 'downloading' forever; log it so the failure is visible.
-                                        DataVerticle.fileRepository.updateDownloadStatus(
-                                                fileRecord.id(),
-                                                fileRecord.uniqueId(),
-                                                null,
-                                                targetStatus,
-                                                null
-                                        ).onFailure(err -> log.error("[%s] Reconciliation: failed to set zombie %s to %s: %s"
-                                                .formatted(getRootId(), fileRecord.uniqueId(), targetStatus, err.getMessage())));
-                                    }
+        // The whole pass (orphan retire + downloading sweep, INCLUDING every DB write it composes) is
+        // one tracked operation: the in-flight guard clears only when it fully resolves, and the
+        // shutdown drain awaits it so no reconciliation write can hit a closed pool.
+        Future<Void> pass = Future.join(orphanFuture, sweepFuture).mapEmpty();
+        trackOperation(pass).onComplete(_ -> reconciliationInFlight = false);
+    }
+
+    /**
+     * Reconcile ONE 'downloading' row against TDLib and COMPOSE the resulting DB write, so the
+     * returned future completes only after the write completes. Never fails (per-file errors are
+     * logged and swallowed into a succeeded future) so a single bad row cannot short-circuit the
+     * joined pass.
+     */
+    private Future<Void> reconcileOneDownloadingFile(FileRecord fileRecord, int[] reconciledCount) {
+        return client.execute(new TdApi.GetFile(fileRecord.id()), 15_000, vertx)
+                .compose(file -> {
+                    if (file.local != null && file.local.isDownloadingCompleted) {
+                        log.info("[%s] Reconciliation: File completed but not updated in DB: %s".formatted(getRootId(), file.remote.uniqueId));
+                        reconciledCount[0]++;
+                        return DataVerticle.fileRepository.updateDownloadStatus(
+                                        file.id,
+                                        file.remote.uniqueId,
+                                        file.local.path,
+                                        FileRecord.DownloadStatus.completed,
+                                        System.currentTimeMillis())
+                                .onSuccess(result -> {
+                                    sendFileStatusHttpEvent(file, result);
+                                    log.debug("[%s] Reconciliation fixed file status: %s".formatted(getRootId(), file.remote.uniqueId));
                                 })
-                                .onFailure(e -> {
-                                    // TDLib doesn't know this file ID — it's definitely a zombie, mark as error
-                                    log.info("[%s] Reconciliation: File ID unknown to TDLib, setting to error: %s (dbId=%d)"
-                                            .formatted(getRootId(), fileRecord.uniqueId(), fileRecord.id()));
-                                    reconciledCount[0]++;
+                                .mapEmpty();
+                    } else if (file.local == null
+                            || (!file.local.isDownloadingActive && !file.local.isDownloadingCompleted)) {
+                        // Zombie: DB says 'downloading' but TDLib says not active and not completed.
+                        // If queued > 2 min ago, mark as error to break retry cycles; otherwise reset to idle for one retry.
+                        boolean staleZombie = fileRecord.queuedAt() != null
+                                && (System.currentTimeMillis() - fileRecord.queuedAt()) > 120_000;
+                        FileRecord.DownloadStatus targetStatus = staleZombie
+                                ? FileRecord.DownloadStatus.error
+                                : FileRecord.DownloadStatus.idle;
+                        log.info("[%s] Reconciliation: Zombie download detected (%s), setting to %s: %s (dbId=%d)"
+                                .formatted(getRootId(), staleZombie ? "stale" : "fresh", targetStatus, fileRecord.uniqueId(), fileRecord.id()));
+                        reconciledCount[0]++;
+                        // D8: surface the write failure (do not fire-and-forget). A zombie reconciliation
+                        // write that silently fails leaves the row stuck 'downloading' forever.
+                        return DataVerticle.fileRepository.updateDownloadStatus(
+                                        fileRecord.id(), fileRecord.uniqueId(), null, targetStatus, null)
+                                .onFailure(err -> log.error("[%s] Reconciliation: failed to set zombie %s to %s: %s"
+                                        .formatted(getRootId(), fileRecord.uniqueId(), targetStatus, err.getMessage())))
+                                .mapEmpty();
+                    }
+                    return Future.<Void>succeededFuture();
+                })
+                .recover(e -> {
+                    // TDLib doesn't know this file ID (or the call timed out) — treat as a zombie, mark
+                    // as error, and COMPOSE that write so the future reflects its completion.
+                    log.info("[%s] Reconciliation: File ID unknown to TDLib, setting to error: %s (dbId=%d)"
+                            .formatted(getRootId(), fileRecord.uniqueId(), fileRecord.id()));
+                    reconciledCount[0]++;
+                    return DataVerticle.fileRepository.updateDownloadStatus(
+                                    fileRecord.id(), fileRecord.uniqueId(), null, FileRecord.DownloadStatus.error, null)
+                            .onFailure(err -> log.error("[%s] Reconciliation: failed to set unknown-to-TDLib %s to error: %s"
+                                    .formatted(getRootId(), fileRecord.uniqueId(), err.getMessage())))
+                            .mapEmpty();
+                })
+                // Never fail the joined pass on a per-file error (writes already surfaced above).
+                .recover(_ -> Future.succeededFuture());
+    }
 
-                                    // D8: surface the write failure (do not fire-and-forget).
-                                    DataVerticle.fileRepository.updateDownloadStatus(
-                                            fileRecord.id(),
-                                            fileRecord.uniqueId(),
-                                            null,
-                                            FileRecord.DownloadStatus.error,
-                                            null
-                                    ).onFailure(err -> log.error("[%s] Reconciliation: failed to set unknown-to-TDLib %s to error: %s"
-                                            .formatted(getRootId(), fileRecord.uniqueId(), err.getMessage())));
-                                });
-                    });
+    // Process-wide single-flight for retireOrphanedAttempts (a global DB sweep). Multiple
+    // TelegramVerticles tick their 30s reconciliation timers independently; without this they would
+    // all issue the same global retire concurrently. Concurrent callers share the pending future.
+    private static final SingleFlight<Integer> ORPHAN_RECONCILIATION = new SingleFlight<>();
 
-                    if (reconciledCount[0] > 0) {
-                        log.info("[%s] Reconciliation completed: fixed %d stuck downloads".formatted(getRootId(), reconciledCount[0]));
+    private Future<Integer> retireOrphanedAttemptsSingleFlight() {
+        return ORPHAN_RECONCILIATION.run(() -> DataVerticle.fileRepository.retireOrphanedAttempts()
+                .onSuccess(retired -> {
+                    if (retired != null && retired > 0) {
+                        log.debug("[%s] Reconciliation retired %d orphaned download attempt(s)".formatted(getRootId(), retired));
                     }
                 })
-                .onFailure(e -> log.error("[%s] Failed to get downloading files for reconciliation: %s".formatted(getRootId(), e.getMessage())));
+                .onFailure(err -> log.warn("[%s] Failed to retire orphaned attempts: %s".formatted(getRootId(), err.getMessage()))));
     }
 
     private void onConnectionStateUpdated(TdApi.ConnectionState connectionState) {
@@ -1125,8 +1280,20 @@ public class TelegramVerticle extends AbstractVerticle {
                 sendEvent(EventPayload.build(EventPayload.TYPE_AUTHORIZATION, authorizationState));
                 telegramChats.loadMainChatList();
                 telegramChats.loadArchivedChatList();
-                // Sync download status for files marked as completed in database
-                syncCompletedFilesStatus();
+                // Sync download status for files marked as completed in database.
+                // This authorization callback is now MARSHALED onto the verticle's event-loop context
+                // (D4/D5 root fix). syncCompletedFilesStatus does per-file blocking filesystem checks
+                // (FileUtil.exist / Files.getLastModifiedTime sweeps) and blocking DB awaits, so it
+                // runs on a WORKER thread (executeBlocking) — marshaling the callback must not push
+                // that blocking work onto the event loop. TRACKED so the shutdown drain awaits its DB
+                // writes before the pool closes (skip entirely once draining).
+                if (!draining) {
+                    trackOperation(vertx.executeBlocking(() -> {
+                        syncCompletedFilesStatus();
+                        return (Void) null;
+                    }, false)).onFailure(e -> log.error("[%s] syncCompletedFilesStatus failed: %s"
+                            .formatted(getRootId(), e.getMessage())));
+                }
                 break;
             case TdApi.AuthorizationStateLoggingOut.CONSTRUCTOR:
                 authorized = false;
@@ -1137,6 +1304,11 @@ public class TelegramVerticle extends AbstractVerticle {
                 break;
             case TdApi.AuthorizationStateClosed.CONSTRUCTOR:
                 authorized = false;
+                // D5: the client is definitively closed — reject any outstanding request promises so
+                // no Java future hangs waiting on a callback that will never fire. Idempotent with
+                // the close() path.
+                client.rejectAllOutstanding(
+                        new IllegalStateException("[%s] TDLib client closed".formatted(this.getRootId())));
                 if (needDelete) {
                     File root = FileUtil.file(this.rootPath);
                     if (root.exists()) {
@@ -1166,94 +1338,117 @@ public class TelegramVerticle extends AbstractVerticle {
             }
             String finalLocalPath = localPath;
             Long finalCompletionDate = completionDate;
-            DataVerticle.fileRepository.getByUniqueId(file.remote.uniqueId)
-                    .onSuccess(fileRecord -> {
-                        FileRecord.DownloadStatus downloadStatus = TdApiHelp.getDownloadStatus(file);
-
-                        if (fileRecord != null) {
-                            // Never downgrade 'processed' or 'imported' status — these are set by
-                            // external services (telegram-postproc) after files are moved out of inbox.
-                            // After a container restart, tdlib reports these as 'idle' because its
-                            // local cache is gone, but the DB status is authoritative.
-                            if (fileRecord.isDownloadStatus(FileRecord.DownloadStatus.processed) ||
-                                fileRecord.isDownloadStatus(FileRecord.DownloadStatus.imported)) {
-                                return;
-                            }
-                            if (fileRecord.isDownloadStatus(FileRecord.DownloadStatus.completed) &&
-                                fileRecord.isTransferStatus(FileRecord.TransferStatus.completed) &&
-                                FileUtil.exist(fileRecord.localPath())) {
-                                return;
-                            }
-                            if (downloadStatus == null) {
-                                // Check if download actually completed even though getDownloadStatus returned null
-                                if (file.local != null && file.local.isDownloadingCompleted) {
-                                    log.debug("[{}] File download completed but getDownloadStatus returned null: {}", getRootId(), file.remote.uniqueId);
-                                    downloadStatus = FileRecord.DownloadStatus.completed;
-                                } else {
-                                    downloadStatus = FileRecord.DownloadStatus.idle;
-                                }
-                            }
-                            // Files downloaded to inbox are marked as 'completed'
-                            // External services (telegram-postproc) will update to 'processed' when moved
-                            Future<FileRecord.DownloadStatus> statusFuture;
-                            if (downloadStatus == null) {
-                                statusFuture = Future.succeededFuture(FileRecord.DownloadStatus.idle);
-                            } else {
-                                statusFuture = Future.succeededFuture(downloadStatus);
-                            }
-                            
-                            statusFuture.compose(finalStatus -> {
-                                // A 'completed' write is the TDLib download-finished event. TDLib DEDUPS:
-                                // one TdApi.File / one download / ONE completion per file identity
-                                // (UpdateFile carries only the file object, no attempt id — see
-                                // TdApiHelp.getDownloadStatus and the TelegramClient result handler). So a
-                                // "stale attempt1 completion distinct from attempt2's" cannot physically
-                                // occur — there is exactly one completion, reporting the current file. The
-                                // single atomic exact-state CAS (download_status='downloading' -> 'completed'
-                                // AND retire the active attempt in ONE statement) is therefore both correct
-                                // and sufficient: the 'downloading' guard makes an external reset-to-idle a
-                                // no-op (rowCount 0, no clobber); if the row is downloading it IS the current
-                                // file finishing. No per-attempt attribution is achievable OR needed.
-                                if (finalStatus == FileRecord.DownloadStatus.completed) {
-                                    return DataVerticle.fileRepository.completeDownloadAndRetireAttempt(file.id,
-                                            file.remote.uniqueId,
-                                            finalLocalPath,
-                                            finalCompletionDate);
-                                }
-                                // Non-terminal statuses (idle/paused) keep the un-owned chokepoint, which
-                                // still enforces canTransitionTo + exact-state CAS (external-reset tolerant).
-                                return DataVerticle.fileRepository.updateDownloadStatus(file.id,
-                                                file.remote.uniqueId,
-                                                finalLocalPath,
-                                                finalStatus,
-                                                finalCompletionDate);
-                            }).onSuccess(r -> {
-                                        sendFileStatusHttpEvent(file, r);
-                                        
-                                        // Set file modification time to match original Telegram upload date
-                                        if (finalCompletionDate != null && finalLocalPath != null && fileRecord.date() > 0) {
-                                            try {
-                                                Path filePath = Path.of(finalLocalPath);
-                                                if (Files.exists(filePath)) {
-                                                    FileTime originalTime = FileTime.fromMillis(fileRecord.date() * 1000L);
-                                                    Files.setLastModifiedTime(filePath, originalTime);
-                                                    log.debug("Set file modification time for {} to {}", filePath.getFileName(), 
-                                                             DateUtil.date(fileRecord.date() * 1000L));
-                                                }
-                                            } catch (Exception e) {
-                                                log.warn("Failed to set file modification time for {}: {}", 
-                                                        finalLocalPath, e.getMessage());
-                                            }
-                                        }
-                                    });
-                        }
-                    });
+            // Shutdown-drain gate: once draining, do NOT start a new file-update status write — a late
+            // UpdateFile arriving during shutdown must not spin up fresh DB work that could outlive the
+            // drain and hit a closing/closed pool. The event publish below still runs (in-memory only).
+            if (!draining) {
+                // This is the MOST COMMON callback-originated DB write (every download-progress update).
+                // The whole read+write chain is one TRACKED operation so drainOutstandingOperations()
+                // joins it before the client/pool closes (no write after pool close). The write is
+                // COMPOSED (not fire-and-forget in onSuccess) so the tracked future reflects real DB
+                // completion.
+                Future<Void> persist = fileUpdatePersistOverrideForTest != null
+                        ? fileUpdatePersistOverrideForTest.get()
+                        : persistFileUpdate(file, finalLocalPath, finalCompletionDate);
+                trackOperation(persist)
+                        .onFailure(e -> log.debug("[{}] onFileUpdated persist failed for {}: {}",
+                                getRootId(), file.remote.uniqueId, e.getMessage()));
+            }
 
             if (completionDate != null || lastFileEventTime == 0 || System.currentTimeMillis() - lastFileEventTime > 1000) {
                 sendEvent(EventPayload.build(EventPayload.TYPE_FILE, updateFile));
                 lastFileEventTime = System.currentTimeMillis();
             }
         }
+    }
+
+    /**
+     * The DB read+write chain for a live TDLib file update, returned as ONE {@code Future<Void>} that
+     * completes only AFTER the status write completes — so it can be tracked by the shutdown drain.
+     * Composes the write (never fire-and-forget). Preserves the never-downgrade / dedup-CAS semantics
+     * exactly; a null record or an early-return branch resolves to a succeeded no-op.
+     */
+    private Future<Void> persistFileUpdate(TdApi.File file, String finalLocalPath, Long finalCompletionDate) {
+        return DataVerticle.fileRepository.getByUniqueId(file.remote.uniqueId)
+                .compose(fileRecord -> {
+                    if (fileRecord == null) {
+                        return Future.<Void>succeededFuture();
+                    }
+                    FileRecord.DownloadStatus downloadStatus = TdApiHelp.getDownloadStatus(file);
+
+                    // Never downgrade 'processed' or 'imported' status — these are set by
+                    // external services (telegram-postproc) after files are moved out of inbox.
+                    // After a container restart, tdlib reports these as 'idle' because its
+                    // local cache is gone, but the DB status is authoritative.
+                    if (fileRecord.isDownloadStatus(FileRecord.DownloadStatus.processed) ||
+                        fileRecord.isDownloadStatus(FileRecord.DownloadStatus.imported)) {
+                        return Future.<Void>succeededFuture();
+                    }
+                    if (fileRecord.isDownloadStatus(FileRecord.DownloadStatus.completed) &&
+                        fileRecord.isTransferStatus(FileRecord.TransferStatus.completed) &&
+                        FileUtil.exist(fileRecord.localPath())) {
+                        return Future.<Void>succeededFuture();
+                    }
+                    if (downloadStatus == null) {
+                        // Check if download actually completed even though getDownloadStatus returned null
+                        if (file.local != null && file.local.isDownloadingCompleted) {
+                            log.debug("[{}] File download completed but getDownloadStatus returned null: {}", getRootId(), file.remote.uniqueId);
+                            downloadStatus = FileRecord.DownloadStatus.completed;
+                        } else {
+                            downloadStatus = FileRecord.DownloadStatus.idle;
+                        }
+                    }
+                    // Files downloaded to inbox are marked as 'completed'
+                    // External services (telegram-postproc) will update to 'processed' when moved
+                    FileRecord.DownloadStatus finalStatus = downloadStatus == null
+                            ? FileRecord.DownloadStatus.idle : downloadStatus;
+
+                    Future<JsonObject> writeFuture;
+                    // A 'completed' write is the TDLib download-finished event. TDLib DEDUPS:
+                    // one TdApi.File / one download / ONE completion per file identity
+                    // (UpdateFile carries only the file object, no attempt id — see
+                    // TdApiHelp.getDownloadStatus and the TelegramClient result handler). So a
+                    // "stale attempt1 completion distinct from attempt2's" cannot physically
+                    // occur — there is exactly one completion, reporting the current file. The
+                    // single atomic exact-state CAS (download_status='downloading' -> 'completed'
+                    // AND retire the active attempt in ONE statement) is therefore both correct
+                    // and sufficient: the 'downloading' guard makes an external reset-to-idle a
+                    // no-op (rowCount 0, no clobber); if the row is downloading it IS the current
+                    // file finishing. No per-attempt attribution is achievable OR needed.
+                    if (finalStatus == FileRecord.DownloadStatus.completed) {
+                        writeFuture = DataVerticle.fileRepository.completeDownloadAndRetireAttempt(file.id,
+                                file.remote.uniqueId,
+                                finalLocalPath,
+                                finalCompletionDate);
+                    } else {
+                        // Non-terminal statuses (idle/paused) keep the un-owned chokepoint, which
+                        // still enforces canTransitionTo + exact-state CAS (external-reset tolerant).
+                        writeFuture = DataVerticle.fileRepository.updateDownloadStatus(file.id,
+                                file.remote.uniqueId,
+                                finalLocalPath,
+                                finalStatus,
+                                finalCompletionDate);
+                    }
+                    return writeFuture.onSuccess(r -> {
+                        sendFileStatusHttpEvent(file, r);
+
+                        // Set file modification time to match original Telegram upload date
+                        if (finalCompletionDate != null && finalLocalPath != null && fileRecord.date() > 0) {
+                            try {
+                                Path filePath = Path.of(finalLocalPath);
+                                if (Files.exists(filePath)) {
+                                    FileTime originalTime = FileTime.fromMillis(fileRecord.date() * 1000L);
+                                    Files.setLastModifiedTime(filePath, originalTime);
+                                    log.debug("Set file modification time for {} to {}", filePath.getFileName(),
+                                            DateUtil.date(fileRecord.date() * 1000L));
+                                }
+                            } catch (Exception e) {
+                                log.warn("Failed to set file modification time for {}: {}",
+                                        finalLocalPath, e.getMessage());
+                            }
+                        }
+                    }).mapEmpty();
+                });
     }
 
     private void onFileDownloadsUpdated(TdApi.UpdateFileDownloads updateFileDownloads) {
@@ -1357,171 +1552,155 @@ public class TelegramVerticle extends AbstractVerticle {
                 });
     }
     
+    /**
+     * Reconcile DB-'completed' rows against disk at authorization-ready. Runs on a WORKER thread
+     * (dispatched via executeBlocking from the marshaled authorization callback): the per-file
+     * filesystem checks (FileUtil.exist / Files.getLastModifiedTime) and the DB writes are blocking,
+     * so they MUST NOT run on the event loop. Async calls are joined with {@link MessyUtils#await}
+     * (safe on a worker thread) so the FS and DB work is sequential and every write is SURFACED
+     * (D8: no fire-and-forget). The Phase-3 recovery policy (mid-transfer skip, completed-but-missing
+     * re-queue, never-downgrade) is unchanged.
+     */
     private void syncCompletedFilesStatus() {
         if (telegramRecord == null) {
             return;
         }
-        
+
         log.info("[%s] Starting sync of completed files status...".formatted(getRootId()));
-        
+
         // Get completed files in batches to avoid loading too many at once
         Map<String, String> filter = new HashMap<>();
         filter.put("downloadStatus", FileRecord.DownloadStatus.completed.name());
         filter.put("limit", "100"); // Process in batches of 100
-        
-        DataVerticle.fileRepository.getFiles(0, filter)
-                .onSuccess(result -> {
-                    List<FileRecord> completedFiles = result.v1();
-                    if (completedFiles.isEmpty()) {
-                        log.debug("[%s] No completed files to sync".formatted(getRootId()));
-                        return;
-                    }
-                    
-                    log.info("[%s] Syncing %d completed files...".formatted(getRootId(), completedFiles.size()));
-                    
-                    // Use AtomicInteger for thread-safe counting in async callbacks
-                    java.util.concurrent.atomic.AtomicInteger synced = new java.util.concurrent.atomic.AtomicInteger(0);
-                    java.util.concurrent.atomic.AtomicInteger notFound = new java.util.concurrent.atomic.AtomicInteger(0);
-                    java.util.concurrent.atomic.AtomicInteger processed = new java.util.concurrent.atomic.AtomicInteger(0);
-                    
-                    for (FileRecord fileRecord : completedFiles) {
-                        // Skip if file doesn't belong to this telegram account
-                        if (fileRecord.telegramId() != telegramRecord.id()) {
-                            processed.incrementAndGet();
-                            continue;
-                        }
-                        
-                        // A row mid-transfer (transfer_status='transferring') is a crashed transfer owned
-                        // by TransferVerticle's filesystem-truth reconciliation, which may recover it
-                        // FORWARD (the file is safely at the destination). Do NOT classify it as a loss or
-                        // re-download it here — that would misclassify a SUCCESSFUL crash-after-rename
-                        // transfer. Leave it for the transfer reconciler.
-                        if (fileRecord.isTransferStatus(FileRecord.TransferStatus.transferring)) {
-                            log.debug("[%s] Skipping mid-transfer row in completed-sync (owned by transfer reconciliation): %s"
-                                    .formatted(getRootId(), fileRecord.uniqueId()));
-                            synced.incrementAndGet();
-                            checkSyncComplete(processed.incrementAndGet(), completedFiles.size(), synced.get(), notFound.get());
-                            continue;
-                        }
 
-                        // Check if file exists on disk
-                        if (StrUtil.isBlank(fileRecord.localPath()) || !FileUtil.exist(fileRecord.localPath())) {
-                            // COMPLETED-BUT-MISSING RECOVERY POLICY (Phase 3, D6 invariant resolution).
-                            // A row that is download_status='completed' (download reported done) whose
-                            // artifact is ABSENT, is NOT mid-transfer (guarded above), and is NOT
-                            // processed/imported, is a GENUINE LOSS: the file the DB claims to hold does not
-                            // exist. The prior behavior silently PRESERVED such a completed-but-gone row
-                            // (backfilling a completion_date), which hid the loss forever. The explicit
-                            // policy is to make it RECOVERABLE: re-queue for re-download (reset to idle).
-                            //
-                            // processed/imported are NEVER touched here: syncCompletedFilesStatus filters
-                            // download_status='completed' (line above), so those external-owned terminal
-                            // rows are never even loaded; requeueCompletedMissingArtifact additionally
-                            // guards download_status='completed' as defence-in-depth. A row the user
-                            // deliberately moved out of the inbox reaches 'processed' via the external
-                            // pipeline and is thus excluded — only a still-'completed' row with a vanished
-                            // artifact (never transferred/processed) is re-queued.
-                            log.warn("[%s] Completed-but-missing artifact (genuine loss) - re-queuing for re-download: %s (path=%s)"
-                                    .formatted(getRootId(), fileRecord.uniqueId(), fileRecord.localPath()));
-                            DataVerticle.fileRepository.requeueCompletedMissingArtifact(List.of(fileRecord.uniqueId()))
-                                    .onSuccess(n -> {
-                                        synced.incrementAndGet();
-                                        checkSyncComplete(processed.incrementAndGet(), completedFiles.size(), synced.get(), notFound.get());
-                                    })
-                                    .onFailure(e -> {
-                                        // Surface the failure (do not swallow): a completed-but-missing row
-                                        // that could not be re-queued remains a silent loss until next boot.
-                                        log.error("[%s] Failed to re-queue completed-but-missing file %s: %s"
-                                                .formatted(getRootId(), fileRecord.uniqueId(), e.getMessage()));
-                                        checkSyncComplete(processed.incrementAndGet(), completedFiles.size(), synced.get(), notFound.get());
-                                    });
-                            continue;
-                        }
-                        
-                        // File exists - verify with Telegram client
-                        // Query the file to sync its status
-                        client.execute(new TdApi.GetFile(fileRecord.id()))
-                                .onSuccess(file -> {
-                                    if (file != null && file.local != null && file.local.isDownloadingCompleted) {
-                                        // File is actually completed - sync status
-                                        syncFileDownloadStatus(file, null, null)
-                                                .onSuccess(r -> {
-                                                    synced.incrementAndGet();
-                                                    checkSyncComplete(processed.incrementAndGet(), completedFiles.size(), synced.get(), notFound.get());
-                                                })
-                                                .onFailure(e -> {
-                                                    log.debug("[%s] Failed to sync file status: %s"
-                                                            .formatted(getRootId(), fileRecord.uniqueId()));
-                                                    checkSyncComplete(processed.incrementAndGet(), completedFiles.size(), synced.get(), notFound.get());
-                                                });
-                                    } else {
-                                        // File not completed in Telegram cache, but exists on disk
-                                        // Keep it as completed since the file is actually there
-                                        log.debug("[%s] File exists on disk but not in Telegram cache - keeping as completed: %s"
-                                                .formatted(getRootId(), fileRecord.uniqueId()));
-                                        // Ensure completionDate is set if missing
-                                        Long completionDate = fileRecord.completionDate();
-                                        if (completionDate == null || completionDate == 0) {
-                                            // Set completionDate to file modification time or current time
-                                            try {
-                                                Path filePath = Path.of(fileRecord.localPath());
-                                                if (Files.exists(filePath)) {
-                                                    completionDate = Files.getLastModifiedTime(filePath).toMillis();
-                                                } else {
-                                                    completionDate = System.currentTimeMillis();
-                                                }
-                                                DataVerticle.fileRepository.updateDownloadStatus(
-                                                    fileRecord.id(),
-                                                    fileRecord.uniqueId(),
-                                                    fileRecord.localPath(),
-                                                    FileRecord.DownloadStatus.completed,
-                                                    completionDate
-                                                );
-                                            } catch (Exception ex) {
-                                                log.debug("[%s] Failed to set completionDate: %s"
-                                                        .formatted(getRootId(), ex.getMessage()));
-                                            }
-                                        }
-                                        synced.incrementAndGet();
-                                        checkSyncComplete(processed.incrementAndGet(), completedFiles.size(), synced.get(), notFound.get());
-                                    }
-                                })
-                                .onFailure(e -> {
-                                    // File might not be accessible from Telegram, but exists on disk
-                                    // Keep it as completed since the file is actually there
-                                    log.debug("[%s] Could not query file from Telegram (file exists on disk) - keeping as completed: %s"
-                                            .formatted(getRootId(), fileRecord.uniqueId()));
-                                    // Ensure completionDate is set if missing
-                                    Long completionDate = fileRecord.completionDate();
-                                    if (completionDate == null || completionDate == 0) {
-                                        try {
-                                            Path filePath = Path.of(fileRecord.localPath());
-                                            if (Files.exists(filePath)) {
-                                                completionDate = Files.getLastModifiedTime(filePath).toMillis();
-                                            } else {
-                                                completionDate = System.currentTimeMillis();
-                                            }
-                                            DataVerticle.fileRepository.updateDownloadStatus(
-                                                fileRecord.id(),
-                                                fileRecord.uniqueId(),
-                                                fileRecord.localPath(),
-                                                FileRecord.DownloadStatus.completed,
-                                                completionDate
-                                            );
-                                        } catch (Exception ex) {
-                                            log.debug("[%s] Failed to set completionDate: %s"
-                                                    .formatted(getRootId(), ex.getMessage()));
-                                        }
-                                    }
-                                    synced.incrementAndGet();
-                                    checkSyncComplete(processed.incrementAndGet(), completedFiles.size(), synced.get(), notFound.get());
-                                });
+        List<FileRecord> completedFiles;
+        try {
+            completedFiles = MessyUtils.await(DataVerticle.fileRepository.getFiles(0, filter)).v1();
+        } catch (Exception e) {
+            log.error("[%s] Failed to sync completed files status: %s".formatted(getRootId(), e.getMessage()));
+            return;
+        }
+        if (completedFiles.isEmpty()) {
+            log.debug("[%s] No completed files to sync".formatted(getRootId()));
+            return;
+        }
+
+        log.info("[%s] Syncing %d completed files...".formatted(getRootId(), completedFiles.size()));
+
+        int synced = 0;
+        int notFound = 0;
+        int processed = 0;
+
+        for (FileRecord fileRecord : completedFiles) {
+            // Skip if file doesn't belong to this telegram account
+            if (fileRecord.telegramId() != telegramRecord.id()) {
+                processed++;
+                continue;
+            }
+
+            // A row mid-transfer (transfer_status='transferring') is a crashed transfer owned
+            // by TransferVerticle's filesystem-truth reconciliation, which may recover it
+            // FORWARD (the file is safely at the destination). Do NOT classify it as a loss or
+            // re-download it here — that would misclassify a SUCCESSFUL crash-after-rename
+            // transfer. Leave it for the transfer reconciler.
+            if (fileRecord.isTransferStatus(FileRecord.TransferStatus.transferring)) {
+                log.debug("[%s] Skipping mid-transfer row in completed-sync (owned by transfer reconciliation): %s"
+                        .formatted(getRootId(), fileRecord.uniqueId()));
+                synced++;
+                checkSyncComplete(++processed, completedFiles.size(), synced, notFound);
+                continue;
+            }
+
+            // Check if file exists on disk (blocking — safe here, worker thread)
+            if (StrUtil.isBlank(fileRecord.localPath()) || !FileUtil.exist(fileRecord.localPath())) {
+                // COMPLETED-BUT-MISSING RECOVERY POLICY (Phase 3, D6 invariant resolution).
+                // A row that is download_status='completed' (download reported done) whose
+                // artifact is ABSENT, is NOT mid-transfer (guarded above), and is NOT
+                // processed/imported, is a GENUINE LOSS: the file the DB claims to hold does not
+                // exist. The prior behavior silently PRESERVED such a completed-but-gone row
+                // (backfilling a completion_date), which hid the loss forever. The explicit
+                // policy is to make it RECOVERABLE: re-queue for re-download (reset to idle).
+                //
+                // processed/imported are NEVER touched here: syncCompletedFilesStatus filters
+                // download_status='completed' (line above), so those external-owned terminal
+                // rows are never even loaded; requeueCompletedMissingArtifact additionally
+                // guards download_status='completed' as defence-in-depth. A row the user
+                // deliberately moved out of the inbox reaches 'processed' via the external
+                // pipeline and is thus excluded — only a still-'completed' row with a vanished
+                // artifact (never transferred/processed) is re-queued.
+                log.warn("[%s] Completed-but-missing artifact (genuine loss) - re-queuing for re-download: %s (path=%s)"
+                        .formatted(getRootId(), fileRecord.uniqueId(), fileRecord.localPath()));
+                try {
+                    MessyUtils.await(DataVerticle.fileRepository.requeueCompletedMissingArtifact(List.of(fileRecord.uniqueId())));
+                    synced++;
+                } catch (Exception e) {
+                    // Surface the failure (do not swallow): a completed-but-missing row
+                    // that could not be re-queued remains a silent loss until next boot.
+                    log.error("[%s] Failed to re-queue completed-but-missing file %s: %s"
+                            .formatted(getRootId(), fileRecord.uniqueId(), e.getMessage()));
+                }
+                checkSyncComplete(++processed, completedFiles.size(), synced, notFound);
+                continue;
+            }
+
+            // File exists - verify with Telegram client (bounded so a hung TDLib call cannot pin
+            // the worker thread). Query the file to sync its status.
+            TdApi.File file;
+            boolean queryFailed = false;
+            try {
+                file = MessyUtils.await(client.execute(new TdApi.GetFile(fileRecord.id()), 15_000, vertx));
+            } catch (Exception e) {
+                file = null;
+                queryFailed = true;
+                log.debug("[%s] Could not query file from Telegram (file exists on disk) - keeping as completed: %s"
+                        .formatted(getRootId(), fileRecord.uniqueId()));
+            }
+
+            if (!queryFailed && file != null && file.local != null && file.local.isDownloadingCompleted) {
+                // File is actually completed - sync status
+                try {
+                    MessyUtils.await(syncFileDownloadStatus(file, null, null));
+                } catch (Exception e) {
+                    log.debug("[%s] Failed to sync file status: %s".formatted(getRootId(), fileRecord.uniqueId()));
+                }
+                synced++;
+                checkSyncComplete(++processed, completedFiles.size(), synced, notFound);
+                continue;
+            }
+
+            // File not completed in Telegram cache (or query failed), but exists on disk — keep it
+            // as completed since the file is actually there. Ensure completionDate is set if missing.
+            if (!queryFailed) {
+                log.debug("[%s] File exists on disk but not in Telegram cache - keeping as completed: %s"
+                        .formatted(getRootId(), fileRecord.uniqueId()));
+            }
+            Long completionDate = fileRecord.completionDate();
+            if (completionDate == null || completionDate == 0) {
+                try {
+                    Path filePath = Path.of(fileRecord.localPath());
+                    if (Files.exists(filePath)) {
+                        completionDate = Files.getLastModifiedTime(filePath).toMillis();
+                    } else {
+                        completionDate = System.currentTimeMillis();
                     }
-                })
-                .onFailure(e -> log.error("[%s] Failed to sync completed files status: %s"
-                        .formatted(getRootId(), e.getMessage())));
+                    // D8: surface the write failure (was fire-and-forget). A dropped completionDate
+                    // backfill silently leaves the row inconsistent.
+                    MessyUtils.await(DataVerticle.fileRepository.updateDownloadStatus(
+                            fileRecord.id(),
+                            fileRecord.uniqueId(),
+                            fileRecord.localPath(),
+                            FileRecord.DownloadStatus.completed,
+                            completionDate
+                    ));
+                } catch (Exception ex) {
+                    log.debug("[%s] Failed to set completionDate: %s".formatted(getRootId(), ex.getMessage()));
+                }
+            }
+            synced++;
+            checkSyncComplete(++processed, completedFiles.size(), synced, notFound);
+        }
     }
-    
+
     private void checkSyncComplete(int processed, int total, int synced, int notFound) {
         if (processed >= total) {
             log.info("[%s] Completed files sync finished. Synced: %d, Not found: %d"

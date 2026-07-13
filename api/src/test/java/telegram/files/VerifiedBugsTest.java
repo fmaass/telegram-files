@@ -64,11 +64,18 @@ public class VerifiedBugsTest {
     }
 
     @Test
-    @DisplayName("chatLists lock must be a shared instance, not a fresh object")
+    @DisplayName("TelegramChats uses ONE shared lock for all chat-list access (Phase 4 unification)")
     void test_chatLists_lock_is_shared_instance() throws Exception {
-        var field = TelegramChats.class.getDeclaredField("chatListsLock");
+        // Phase 4 unified the previous three-lock scheme (chatListsLock + per-chat monitors +
+        // ConcurrentHashMap) into a single `lock` monitor guarding every read and write, so the
+        // getChatList stream can no longer CME against a concurrent setChatPositions.
+        var field = TelegramChats.class.getDeclaredField("lock");
         field.setAccessible(true);
-        assertNotNull(field, "chatListsLock field should exist as a dedicated lock object");
-        assertEquals(Object.class, field.getType(), "chatListsLock should be a plain Object");
+        assertNotNull(field, "a shared `lock` field should exist as the single chat-list monitor");
+        assertEquals(Object.class, field.getType(), "lock should be a plain Object monitor");
+        // The old dedicated chatListsLock must be gone (folded into the single lock).
+        assertThrows(NoSuchFieldException.class,
+                () -> TelegramChats.class.getDeclaredField("chatListsLock"),
+                "chatListsLock should be removed — access is unified under `lock`");
     }
 }

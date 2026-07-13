@@ -195,9 +195,11 @@ public class AutoDownloadVerticle extends AbstractVerticle {
         if (auto.download.rule.historySince != null && auto.download.rule.historySince > 0) {
             try {
                 TelegramVerticle telegramVerticle = TelegramVerticles.getOrElseThrow(auto.telegramId);
+                // D5: bounded so a hung TDLib call cannot pin this virtual thread (caught below).
                 TdApi.Message sentinelMessage = Future.await(
                     telegramVerticle.client.execute(
-                        new TdApi.GetChatMessageByDate(auto.chatId, auto.download.rule.historySince)
+                        new TdApi.GetChatMessageByDate(auto.chatId, auto.download.rule.historySince),
+                        15_000, vertx
                     )
                 );
                 if (sentinelMessage != null) {

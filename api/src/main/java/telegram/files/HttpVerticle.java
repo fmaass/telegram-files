@@ -68,6 +68,15 @@ public class HttpVerticle extends AbstractVerticle {
 
     private static final String SESSION_COOKIE_NAME = "tf";
 
+    // Deployment IDs of the child verticles this verticle owns (D-shutdown). Undeployed in a
+    // controlled order in stop() BEFORE Start undeploys DataVerticle (the pool), so no scheduler /
+    // transfer / callback write can hit a closed pool.
+    private volatile String autoDownloadDeploymentId;
+
+    private volatile String transferDeploymentId;
+
+    private volatile String preloadDeploymentId;
+
     @Override
     public void start(Promise<Void> startPromise) {
         initHttpServer()
@@ -83,11 +92,56 @@ public class HttpVerticle extends AbstractVerticle {
 
     @Override
     public void stop(Promise<Void> stopPromise) {
-        AutomationsHolder.INSTANCE.saveAutoRecords()
+        // Ordered drain (D-shutdown). This runs BEFORE Start undeploys DataVerticle (the pool), so
+        // every in-flight transfer and Telegram callback finishes while the pool is still ALIVE:
+        //   1. schedulers (AutoDownload, Preload) — stop generating new download/preload work;
+        //   2. TelegramVerticles — close TDLib clients, which drains outstanding request callbacks
+        //      (rejectAllOutstanding) and stops new file-completed events from reaching Transfer;
+        //   3. TransferVerticle — its stop() blocks until the in-flight transfer drains.
+        // Failures are logged, never swallowed, and never abort the drain.
+        undeployChild(autoDownloadDeploymentId, "AutoDownloadVerticle")
+                .compose(_ -> undeployChild(preloadDeploymentId, "PreloadMessageVerticle"))
+                .compose(_ -> closeTelegramVerticles())
+                .compose(_ -> undeployChild(transferDeploymentId, "TransferVerticle"))
+                .compose(_ -> AutomationsHolder.INSTANCE.saveAutoRecords())
                 .onComplete(ignore -> {
                     log.info("Http verticle stopped!");
                     stopPromise.complete();
                 });
+    }
+
+    private Future<Void> undeployChild(String deploymentId, String name) {
+        if (StrUtil.isBlank(deploymentId)) {
+            return Future.succeededFuture();
+        }
+        return vertx.undeploy(deploymentId)
+                .onSuccess(_ -> log.info("Undeployed %s during shutdown".formatted(name)))
+                .recover(e -> {
+                    log.error("Failed to undeploy %s during shutdown: %s".formatted(name, e.getMessage()));
+                    return Future.succeededFuture();
+                });
+    }
+
+    // Undeploy every deployed TelegramVerticle. Its stop() calls close(false), which closes the
+    // TDLib client (bounded) and drains outstanding request callbacks (rejectAllOutstanding) — so
+    // no marshaled callback fires after the pool closes. Runs in parallel across accounts; per
+    // account failures are logged, not fatal, and never abort the drain.
+    private Future<Void> closeTelegramVerticles() {
+        List<Future<Void>> closes = new ArrayList<>();
+        for (TelegramVerticle telegramVerticle : TelegramVerticles.getAll()) {
+            String deploymentId = telegramVerticle.deploymentID();
+            if (StrUtil.isBlank(deploymentId)) {
+                continue;
+            }
+            Future<Void> f = vertx.undeploy(deploymentId)
+                    .recover(e -> {
+                        log.error("Failed to undeploy telegram verticle %s during shutdown: %s"
+                                .formatted(telegramVerticle.getId(), e.getMessage()));
+                        return Future.succeededFuture();
+                    });
+            closes.add(f);
+        }
+        return Future.join(new ArrayList<>(closes)).mapEmpty();
     }
 
     public Future<Void> initHttpServer() {
@@ -223,16 +277,19 @@ public class HttpVerticle extends AbstractVerticle {
 
     public Future<Void> initAutoDownloadVerticle() {
         return vertx.deployVerticle(new AutoDownloadVerticle(), Config.VIRTUAL_THREAD_DEPLOYMENT_OPTIONS)
+                .onSuccess(id -> autoDownloadDeploymentId = id)
                 .mapEmpty();
     }
 
     public Future<Void> initTransferVerticle() {
         return vertx.deployVerticle(new TransferVerticle(), Config.VIRTUAL_THREAD_DEPLOYMENT_OPTIONS)
+                .onSuccess(id -> transferDeploymentId = id)
                 .mapEmpty();
     }
 
     public Future<Void> initPreloadMessageVerticle() {
         return vertx.deployVerticle(new PreloadMessageVerticle(), Config.VIRTUAL_THREAD_DEPLOYMENT_OPTIONS)
+                .onSuccess(id -> preloadDeploymentId = id)
                 .mapEmpty();
     }
 

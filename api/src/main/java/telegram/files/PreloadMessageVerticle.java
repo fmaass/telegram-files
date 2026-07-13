@@ -77,7 +77,8 @@ public class PreloadMessageVerticle extends AbstractVerticle {
         searchChatMessages.chatId = auto.chatId;
         searchChatMessages.fromMessageId = auto.preload.nextFromMessageId;
         searchChatMessages.limit = 100;
-        TdApi.FoundChatMessages foundChatMessages = Future.await(telegramVerticle.client.execute(searchChatMessages)
+        // D5: bound the history search so a hung TDLib call cannot pin this virtual thread forever.
+        TdApi.FoundChatMessages foundChatMessages = Future.await(telegramVerticle.client.execute(searchChatMessages, 30_000, vertx)
                 .onFailure(r -> {
                     log.warn("Search chat messages failed! TelegramId: %d ChatId: %d".formatted(auto.telegramId, auto.chatId), r);
                     if (r instanceof TelegramRunException tre) {
@@ -100,6 +101,9 @@ public class PreloadMessageVerticle extends AbstractVerticle {
             if (fileHandlerOptional.isEmpty()) {
                 continue;
             }
+            // GetMessageThread with ignoreException=true returns null on TDLib error (the NORMAL
+            // "message not in a thread" case), so we keep that overload rather than the timeout one
+            // which would fail the future on a plain error. The search call above is already bounded.
             TdApi.MessageThreadInfo messageThreadInfo = Future.await(telegramVerticle.client
                     .execute(new TdApi.GetMessageThread(message.chatId, message.id), true));
             FileRecord fileRecord = fileHandlerOptional.get().convertFileRecord(auto.telegramId).withThreadInfo(messageThreadInfo);
