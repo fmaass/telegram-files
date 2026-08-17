@@ -24,16 +24,11 @@ import org.jooq.lambda.tuple.Tuple2;
 import telegram.files.repository.*;
 
 import java.io.File;
+import java.util.*;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.attribute.FileTime;
-import java.util.Arrays;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
-import java.util.Objects;
-import java.util.Optional;
-import java.util.Set;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
@@ -956,23 +951,23 @@ public class TelegramVerticle extends AbstractVerticle {
                 );
     }
 
-    public Future<TdApi.Proxy> enableProxy(String proxyName) {
+    public Future<TdApi.AddedProxy> enableProxy(String proxyName) {
         if (StrUtil.isBlank(proxyName)) return Future.succeededFuture();
         return DataVerticle.settingRepository.<SettingProxyRecords>getByKey(SettingKey.proxys)
                 .map(settingProxyRecords -> Optional.ofNullable(settingProxyRecords)
                         .flatMap(r -> r.getProxy(proxyName))
                         .orElseThrow(() -> VertxException.noStackTrace("Proxy %s not found".formatted(proxyName)))
                 )
-                .compose(proxy -> this.getTdProxy(proxy)
+                .compose(proxy -> this.getTdAddedProxy(proxy)
                         .map(r -> Tuple.tuple(proxy, r))
                 )
                 .compose(tuple -> {
                     SettingProxyRecords.Item proxy = tuple.v1;
-                    TdApi.Proxy tdProxy = tuple.v2;
+                    TdApi.AddedProxy tdAddedProxy = tuple.v2;
                     boolean edit = false;
-                    if (tdProxy != null) {
-                        if (tdProxy.isEnabled) {
-                            return Future.succeededFuture(tdProxy);
+                    if (tdAddedProxy != null) {
+                        if (tdAddedProxy.isEnabled) {
+                            return Future.succeededFuture(tdAddedProxy);
                         }
                         edit = true;
                     }
@@ -986,10 +981,11 @@ public class TelegramVerticle extends AbstractVerticle {
                             return Future.failedFuture("Unsupported proxy type: %s".formatted(proxy.type));
                         }
                     }
-                    return edit ? client.execute(new TdApi.EditProxy(tdProxy.id, proxy.server, proxy.port, true, proxyType))
-                            : client.execute(new TdApi.AddProxy(proxy.server, proxy.port, true, proxyType));
+                    TdApi.Proxy tdProxy = new TdApi.Proxy(proxy.server, proxy.port, proxyType);
+                    return edit ? client.execute(new TdApi.EditProxy(tdAddedProxy.id, tdProxy, true, proxy.name))
+                            : client.execute(new TdApi.AddProxy(tdProxy, true, proxy.name));
                 })
-                .compose(r -> {
+                .compose( r -> {
                     this.proxyName = proxyName;
                     if (this.telegramRecord != null) {
                         return DataVerticle.telegramRepository.update(this.telegramRecord.withProxy(proxyName))
@@ -1001,7 +997,7 @@ public class TelegramVerticle extends AbstractVerticle {
                 });
     }
 
-    public Future<TdApi.Proxy> toggleProxy(JsonObject jsonObject) {
+    public Future<TdApi.AddedProxy> toggleProxy(JsonObject jsonObject) {
         String toggleProxyName = jsonObject.getString("proxyName");
         if (Objects.equals(toggleProxyName, this.proxyName)) {
             return Future.succeededFuture();
@@ -1024,25 +1020,26 @@ public class TelegramVerticle extends AbstractVerticle {
         }
     }
 
-    public Future<TdApi.Proxy> getTdProxy(SettingProxyRecords.Item proxy) {
+    public Future<TdApi.AddedProxy> getTdAddedProxy(SettingProxyRecords.Item proxy) {
         return client.execute(new TdApi.GetProxies())
                 .map(proxies -> Stream.of(proxies.proxies)
-                        .filter(proxy::equalsTdProxy)
+                        .filter(p -> proxy.equalsTdProxy(p.proxy))
                         .findFirst()
                         .orElse(null));
     }
 
-    public Future<TdApi.Proxy> getTdProxy() {
+    public Future<TdApi.Proxy> getEnabledTdProxy() {
         return client.execute(new TdApi.GetProxies())
                 .map(proxies -> Stream.of(proxies.proxies)
                         .filter(p -> p.isEnabled)
+                        .map(p -> p.proxy)
                         .findFirst()
                         .orElse(null));
     }
 
     public Future<Double> ping() {
-        return this.getTdProxy()
-                .compose(proxy -> client.execute(new TdApi.PingProxy(proxy == null ? 0 : proxy.id)))
+        return this.getEnabledTdProxy()
+                .compose(proxy -> client.execute(new TdApi.PingProxy(proxy)))
                 .map(r -> r.seconds);
     }
 
@@ -1662,7 +1659,7 @@ public class TelegramVerticle extends AbstractVerticle {
                         // Files synced from Telegram are marked as 'completed'
                         // External services will update to 'processed'/'imported' as needed
                         FileRecord.DownloadStatus finalStatus = FileRecord.DownloadStatus.completed;
-                        
+
                         return DataVerticle.fileRepository.updateDownloadStatus(
                                 file.id,
                                 file.remote.uniqueId,
@@ -1677,11 +1674,11 @@ public class TelegramVerticle extends AbstractVerticle {
                                     if (Files.exists(filePath)) {
                                         FileTime originalTime = FileTime.fromMillis(finalFileRecord.date() * 1000L);
                                         Files.setLastModifiedTime(filePath, originalTime);
-                                        log.debug("Set file modification time for {} to {}", filePath.getFileName(), 
+                                        log.debug("Set file modification time for {} to {}", filePath.getFileName(),
                                                  DateUtil.date(finalFileRecord.date() * 1000L));
                                     }
                                 } catch (Exception e) {
-                                    log.warn("Failed to set file modification time for {}: {}", 
+                                    log.warn("Failed to set file modification time for {}: {}",
                                             file.local.path, e.getMessage());
                                 }
                             }
@@ -1712,11 +1709,11 @@ public class TelegramVerticle extends AbstractVerticle {
                                         if (Files.exists(filePath)) {
                                             FileTime originalTime = FileTime.fromMillis(newFileRecord.date() * 1000L);
                                             Files.setLastModifiedTime(filePath, originalTime);
-                                            log.debug("Set file modification time for {} to {}", filePath.getFileName(), 
+                                            log.debug("Set file modification time for {} to {}", filePath.getFileName(),
                                                      DateUtil.date(newFileRecord.date() * 1000L));
                                         }
                                     } catch (Exception e) {
-                                        log.warn("Failed to set file modification time for {}: {}", 
+                                        log.warn("Failed to set file modification time for {}: {}",
                                                 file.local.path, e.getMessage());
                                     }
                                 }
@@ -1731,7 +1728,7 @@ public class TelegramVerticle extends AbstractVerticle {
                     }
                 });
     }
-    
+
     /**
      * Reconcile DB-'completed' rows against disk at authorization-ready. Runs on a WORKER thread
      * (dispatched via executeBlocking from the marshaled authorization callback): the per-file
